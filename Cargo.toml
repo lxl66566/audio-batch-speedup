@@ -24,8 +24,9 @@ walkdir           = "2.3"
 bin = ["anyhow", "clap", "pretty_env_logger"]
 
 [[bin]]
-name = "abs"
-path = "src/main.rs"
+name              = "abs"
+path              = "src/main.rs"
+required-features = ["bin"]
 
 
 [profile.release]
