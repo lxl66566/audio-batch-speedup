@@ -1,0 +1,28 @@
+[package]
+description = "Batch speed up audio files"
+edition     = "2024"
+license     = "MIT"
+name        = "audio-batch-speedup"
+repository  = "https://github.com/lxl66566/audio-batch-speedup"
+version     = "0.1.0"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow            = { version = "1.0", optional = true }
+clap              = { version = "4.5", optional = true, features = ["derive"] }
+indicatif         = { version = "0.17", features = ["rayon"] }
+log               = "0.4"
+pretty_env_logger = { version = "0.5", optional = true }
+rayon             = "1.8"
+walkdir           = "2.3"
+
+[features]
+bin = ["anyhow", "clap", "pretty_env_logger"]
+
+
+[profile.release]
+lto       = true
+opt-level = "z"
+panic     = "abort"
+strip     = true
