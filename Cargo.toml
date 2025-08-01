@@ -14,7 +14,7 @@ version     = "0.1.0"
 anyhow            = { version = "1.0", optional = true }
 bitflags          = "2.5"
 clap              = { version = "4.5", optional = true, features = ["derive"] }
-indicatif         = { version = "0.17", features = ["rayon"] }
+indicatif         = { version = "0.18", features = ["rayon"] }
 log               = "0.4"
 pretty_env_logger = { version = "0.5", optional = true }
 rayon             = "1.8"
