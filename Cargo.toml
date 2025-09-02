@@ -12,7 +12,7 @@ version     = "0.1.0"
 
 [dependencies]
 anyhow            = { version = "1.0", optional = true }
-bitflags          = "2.5"
+bitflags          = "2.9"
 clap              = { version = "4.5", optional = true, features = ["derive"] }
 indicatif         = { version = "0.18", features = ["rayon"] }
 log               = "0.4"
