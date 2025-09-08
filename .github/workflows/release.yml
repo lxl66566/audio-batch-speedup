@@ -14,8 +14,15 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: release audio-batch-speedup
-        uses: lxl66566/rust-simple-release@v0.2.5
+        uses: lxl66566/rust-simple-release@main
         with:
-          targets: aarch64-unknown-linux-musl, aarch64-unknown-linux-gnu, x86_64-pc-windows-msvc, x86_64-unknown-linux-musl, x86_64-unknown-linux-gnu, aarch64-apple-darwin, x86_64-apple-darwin
+          targets: |
+            aarch64-unknown-linux-gnu
+            aarch64-unknown-linux-musl
+            x86_64-pc-windows-msvc
+            x86_64-unknown-linux-musl
+            x86_64-unknown-linux-gnu
+            aarch64-apple-darwin
+            x86_64-apple-darwin
           features: bin
           token: ${{ secrets.GH_TOKEN }}

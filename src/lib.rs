@@ -38,14 +38,7 @@ bitflags! {
 
 impl Default for AudioFormat {
     fn default() -> Self {
-        AudioFormat::OGG
-            | AudioFormat::MP3
-            | AudioFormat::WAV
-            | AudioFormat::FLAC
-            | AudioFormat::AAC
-            | AudioFormat::OPUS
-            | AudioFormat::ALAC
-            | AudioFormat::WMA
+        Self::ALL
     }
 }
 
@@ -60,40 +53,35 @@ impl Default for AudioFormat {
 /// * `Option<AudioFormat>` - The detected audio format, or `None` if it cannot be determined.
 fn detect_audio_format(path: &Path) -> Option<AudioFormat> {
     // Try to detect by magic bytes first
-    if let Ok(mut file) = File::open(path) {
-        let mut buffer = [0; 12]; // Read enough bytes for common headers
+    let mut file = File::open(path).ok()?;
+    let mut buffer = [0; 12]; // Read enough bytes for common headers
+    file.read_exact(&mut buffer).ok()?;
 
-        if file.read_exact(&mut buffer).is_ok() {
-            // OGG (OggS)
-            if buffer[0..4] == [0x4F, 0x67, 0x67, 0x53] {
-                return Some(AudioFormat::OGG);
-            }
-            // MP3 (ID3 tag or starts with 0xFF FB/FA)
-            if buffer[0..3] == [0x49, 0x44, 0x33]
-                || (buffer[0] == 0xFF && (buffer[1] & 0xF6) == 0xF2)
-            {
-                return Some(AudioFormat::MP3);
-            }
-            // WAV (RIFF header with WAVE)
-            if buffer[0..4] == [0x52, 0x49, 0x46, 0x46] && buffer[8..12] == [0x57, 0x41, 0x56, 0x45]
-            {
-                return Some(AudioFormat::WAV);
-            }
-            // FLAC (fLaC)
-            if buffer[0..4] == [0x66, 0x4C, 0x61, 0x43] {
-                return Some(AudioFormat::FLAC);
-            }
-            // AAC (often in MP4/M4A containers, which start with 'ftyp' or 'moov')
-            // This is harder to detect purely by magic bytes without parsing the container.
-            // We'll rely more on extension for AAC/M4A.
-            // OPUS (often in Ogg containers, so OggS will catch it, or WebM)
-            // ALAC (often in MP4/M4A containers)
-            // WMA (ASF header)
-            if buffer[0..4] == [0x30, 0x26, 0xB2, 0x75] {
-                // GUID for ASF header
-                return Some(AudioFormat::WMA);
-            }
-        }
+    // OGG (OggS)
+    if &buffer[0..4] == b"OggS" {
+        return Some(AudioFormat::OGG);
+    }
+    // MP3 (ID3 tag or starts with 0xFF FB/FA)
+    if &buffer[0..3] == b"ID3" || (buffer[0] == 0xFF && (buffer[1] & 0xF6) == 0xF2) {
+        return Some(AudioFormat::MP3);
+    }
+    // WAV (RIFF header with WAVE)
+    if &buffer[0..4] == b"RIFF" && &buffer[8..12] == b"WAVE" {
+        return Some(AudioFormat::WAV);
+    }
+    // FLAC (fLaC)
+    if &buffer[0..4] == b"fLaC" {
+        return Some(AudioFormat::FLAC);
+    }
+    // AAC (often in MP4/M4A containers, which start with 'ftyp' or 'moov')
+    // This is harder to detect purely by magic bytes without parsing the container.
+    // We'll rely more on extension for AAC/M4A.
+    // OPUS (often in Ogg containers, so OggS will catch it, or WebM)
+    // ALAC (often in MP4/M4A containers)
+    // WMA (ASF header)
+    if buffer[0..4] == [0x30, 0x26, 0xB2, 0x75] {
+        // GUID for ASF header
+        return Some(AudioFormat::WMA);
     }
 
     // Fallback to file extension
@@ -174,53 +162,103 @@ pub fn process_audio_files(
 
             let detected_format = detect_audio_format(path);
 
-            if detected_format.is_none() || !formats.contains(detected_format.unwrap()) {
-                debug!(
-                    "Skipping file (unsupported format or not selected): {}",
-                    path.display()
-                );
-                skipped_count.fetch_add(1, Ordering::Relaxed);
+            let Some(detected_format) = detected_format else {
+                debug!("Skipping file (format not detected): {}", path.display());
+                skipped_count.fetch_add(1, Ordering::AcqRel);
+                return;
+            };
+
+            if !formats.contains(detected_format) {
+                debug!("Skipping file (format not selected): {}", path.display());
+                skipped_count.fetch_add(1, Ordering::AcqRel);
                 return;
             }
 
-            let output_file = path.with_file_name(format!(
-                "temp_{}",
-                path.file_name().unwrap().to_str().unwrap()
-            ));
+            let file_name = match path.file_name().and_then(|s| s.to_str()) {
+                Some(name) => name,
+                None => {
+                    error!("Failed to get file name for {}", path.display());
+                    error_count.fetch_add(1, Ordering::AcqRel);
+                    return;
+                }
+            };
+
+            let output_file = path.with_file_name(format!("temp_{}", file_name));
+
+            let input_path_str = match path.to_str() {
+                Some(s) => s,
+                None => {
+                    error!("Failed to convert input path to string: {}", path.display());
+                    error_count.fetch_add(1, Ordering::AcqRel);
+                    return;
+                }
+            };
+
+            let output_file_str = match output_file.to_str() {
+                Some(s) => s,
+                None => {
+                    error!(
+                        "Failed to convert output path to string: {}",
+                        output_file.display()
+                    );
+                    error_count.fetch_add(1, Ordering::AcqRel);
+                    return;
+                }
+            };
 
             let status = Command::new("ffmpeg")
                 .args([
                     "-i",
-                    path.to_str().unwrap(),
+                    input_path_str,
                     "-filter:a",
                     &format!("atempo={}", speed),
                     "-vn",
-                    output_file.to_str().unwrap(),
+                    "-map_metadata",
+                    "0",
+                    output_file_str,
                     "-y",
                     "-loglevel",
                     "error",
                 ])
                 .status();
 
-            if let Err(e) = status {
-                error!("Error processing {}: {}", path.display(), e);
-                error_count.fetch_add(1, Ordering::Relaxed);
-                return;
-            }
-
-            if status.unwrap().success() {
-                if let Err(e) = std::fs::rename(&output_file, path) {
-                    error!("Error renaming file {}: {}", output_file.display(), e);
-                    error_count.fetch_add(1, Ordering::Relaxed);
+            match status {
+                Ok(exit_status) => {
+                    if exit_status.success() {
+                        if let Err(e) = std::fs::rename(&output_file, path) {
+                            error!(
+                                "Error renaming file from {} to {}: {}",
+                                output_file.display(),
+                                path.display(),
+                                e
+                            );
+                            error_count.fetch_add(1, Ordering::AcqRel);
+                        }
+                    } else {
+                        error!(
+                            "ffmpeg failed for {}. Exit code: {:?}",
+                            path.display(),
+                            exit_status.code()
+                        );
+                        error_count.fetch_add(1, Ordering::AcqRel);
+                        // Ensure temp file is removed if ffmpeg failed
+                        if output_file.exists()
+                            && let Err(e) = std::fs::remove_file(&output_file)
+                        {
+                            error!("Error removing temp file {}: {}", output_file.display(), e);
+                        }
+                    }
                 }
-            } else {
-                if output_file.exists() {
-                    if let Err(e) = std::fs::remove_file(&output_file) {
+                Err(e) => {
+                    error!("Error executing ffmpeg for {}: {}", path.display(), e);
+                    error_count.fetch_add(1, Ordering::AcqRel);
+                    // Ensure temp file is removed if ffmpeg execution failed
+                    if output_file.exists()
+                        && let Err(e) = std::fs::remove_file(&output_file)
+                    {
                         error!("Error removing temp file {}: {}", output_file.display(), e);
                     }
                 }
-                error!("Error processing {}", path.display());
-                error_count.fetch_add(1, Ordering::Relaxed);
             }
         });
 
@@ -230,7 +268,7 @@ pub fn process_audio_files(
     let skipped = skipped_count.load(Ordering::Relaxed);
 
     if errors > 0 {
-        log::warn!("Finished with {} errors.", errors);
+        log::error!("Finished with {} errors.", errors);
     }
     if skipped > 0 {
         log::info!("Skipped {} files.", skipped);
