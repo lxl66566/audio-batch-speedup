@@ -102,6 +102,34 @@ fn detect_audio_format(path: &Path) -> Option<AudioFormat> {
     None
 }
 
+/// The minimum/maximum tempo a single `atempo` filter instance accepts.
+const ATEMPO_MIN: f32 = 0.5;
+const ATEMPO_MAX: f32 = 100.0;
+
+/// Builds an ffmpeg audio filter chain for the given speed multiplier.
+///
+/// A single `atempo` instance only accepts values in `[0.5, 100]`, so
+/// out-of-range speeds are decomposed into a chain of `atempo` filters.
+///
+/// Returns `None` if `speed` is not a positive finite number.
+fn build_atempo_filter(speed: f32) -> Option<String> {
+    if !speed.is_finite() || speed <= 0.0 {
+        return None;
+    }
+    let mut parts = Vec::new();
+    let mut remaining = speed;
+    while remaining > ATEMPO_MAX {
+        parts.push(format!("atempo={ATEMPO_MAX}"));
+        remaining /= ATEMPO_MAX;
+    }
+    while remaining < ATEMPO_MIN {
+        parts.push(format!("atempo={ATEMPO_MIN}"));
+        remaining /= ATEMPO_MIN;
+    }
+    parts.push(format!("atempo={remaining}"));
+    Some(parts.join(","))
+}
+
 /// Process all audio files in the specified folder recursively with the given speed multiplier.
 ///
 /// # Arguments
@@ -131,6 +159,13 @@ pub fn process_audio_files(
     formats: AudioFormat,
 ) -> std::io::Result<()> {
     let folder = folder.as_ref();
+
+    let Some(atempo_filter) = build_atempo_filter(speed) else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("Invalid speed multiplier: {speed}. Must be a positive finite number."),
+        ));
+    };
 
     // Collect all files that need to be processed
     let files: Vec<_> = WalkDir::new(folder)
@@ -211,7 +246,7 @@ pub fn process_audio_files(
                     "-i",
                     input_path_str,
                     "-filter:a",
-                    &format!("atempo={}", speed),
+                    &atempo_filter,
                     "-vn",
                     "-map_metadata",
                     "0",
