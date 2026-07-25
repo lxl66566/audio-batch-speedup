@@ -224,13 +224,13 @@ pub fn process_audio_files(
 
             let Some(detected_format) = detected_format else {
                 debug!("Skipping file (format not detected): {}", path.display());
-                skipped_count.fetch_add(1, Ordering::AcqRel);
+                skipped_count.fetch_add(1, Ordering::Relaxed);
                 return;
             };
 
             if !formats.contains(detected_format) {
                 debug!("Skipping file (format not selected): {}", path.display());
-                skipped_count.fetch_add(1, Ordering::AcqRel);
+                skipped_count.fetch_add(1, Ordering::Relaxed);
                 return;
             }
 
@@ -249,7 +249,7 @@ pub fn process_audio_files(
                 Ok(f) => f,
                 Err(e) => {
                     error!("Failed to create temp file for {}: {}", path.display(), e);
-                    error_count.fetch_add(1, Ordering::AcqRel);
+                    error_count.fetch_add(1, Ordering::Relaxed);
                     return;
                 }
             };
@@ -279,7 +279,7 @@ pub fn process_audio_files(
                                 path.display(),
                                 e
                             );
-                            error_count.fetch_add(1, Ordering::AcqRel);
+                            error_count.fetch_add(1, Ordering::Relaxed);
                         }
                     } else {
                         error!(
@@ -287,13 +287,13 @@ pub fn process_audio_files(
                             path.display(),
                             exit_status.code()
                         );
-                        error_count.fetch_add(1, Ordering::AcqRel);
+                        error_count.fetch_add(1, Ordering::Relaxed);
                         // The temp file is removed automatically on drop.
                     }
                 }
                 Err(e) => {
                     error!("Error executing ffmpeg for {}: {}", path.display(), e);
-                    error_count.fetch_add(1, Ordering::AcqRel);
+                    error_count.fetch_add(1, Ordering::Relaxed);
                     // The temp file is removed automatically on drop.
                 }
             }
