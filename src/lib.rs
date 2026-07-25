@@ -219,9 +219,6 @@ pub fn process_audio_files(
         .progress_with(process_pb.clone())
         .for_each(|entry| {
             let path = entry.path();
-            if !path.is_file() {
-                return;
-            }
 
             let detected_format = detect_audio_format(path);
 
