@@ -209,16 +209,26 @@ pub fn process_audio_files(
                 return;
             }
 
-            let file_name = match path.file_name().and_then(|s| s.to_str()) {
-                Some(name) => name,
-                None => {
-                    error!("Failed to get file name for {}", path.display());
+            // Create a uniquely-named temp file in the same directory (so the
+            // final rename stays on one filesystem). The original extension is
+            // kept as the suffix so ffmpeg can infer the output container.
+            let suffix = path
+                .extension()
+                .map(|e| format!(".{}", e.to_string_lossy()))
+                .unwrap_or_default();
+            let temp_file = match tempfile::Builder::new()
+                .prefix(".abs_")
+                .suffix(&suffix)
+                .tempfile_in(path.parent().unwrap_or(Path::new(".")))
+            {
+                Ok(f) => f,
+                Err(e) => {
+                    error!("Failed to create temp file for {}: {}", path.display(), e);
                     error_count.fetch_add(1, Ordering::AcqRel);
                     return;
                 }
             };
-
-            let output_file = path.with_file_name(format!("temp_{}", file_name));
+            let output_file = temp_file.path().to_path_buf();
 
             let input_path_str = match path.to_str() {
                 Some(s) => s,
@@ -276,23 +286,13 @@ pub fn process_audio_files(
                             exit_status.code()
                         );
                         error_count.fetch_add(1, Ordering::AcqRel);
-                        // Ensure temp file is removed if ffmpeg failed
-                        if output_file.exists()
-                            && let Err(e) = std::fs::remove_file(&output_file)
-                        {
-                            error!("Error removing temp file {}: {}", output_file.display(), e);
-                        }
+                        // The temp file is removed automatically on drop.
                     }
                 }
                 Err(e) => {
                     error!("Error executing ffmpeg for {}: {}", path.display(), e);
                     error_count.fetch_add(1, Ordering::AcqRel);
-                    // Ensure temp file is removed if ffmpeg execution failed
-                    if output_file.exists()
-                        && let Err(e) = std::fs::remove_file(&output_file)
-                    {
-                        error!("Error removing temp file {}: {}", output_file.display(), e);
-                    }
+                    // The temp file is removed automatically on drop.
                 }
             }
         });
