@@ -118,6 +118,34 @@ fn detect_audio_format(path: &Path) -> Option<AudioFormat> {
     None
 }
 
+/// Returns ffmpeg encoder arguments for the given format.
+///
+/// Speeding up requires decoding + re-encoding (a filter cannot run on a
+/// copied stream), so ffmpeg's default per-container encoder settings would
+/// silently degrade quality. Lossless formats are re-encoded losslessly;
+/// lossy formats use high-quality settings to minimize generation loss.
+fn encoder_args(format: AudioFormat) -> &'static [&'static str] {
+    if format == AudioFormat::FLAC {
+        &["-c:a", "flac"]
+    } else if format == AudioFormat::WAV {
+        &["-c:a", "pcm_s24le"]
+    } else if format == AudioFormat::ALAC {
+        &["-c:a", "alac"]
+    } else if format == AudioFormat::MP3 {
+        &["-c:a", "libmp3lame", "-q:a", "2"]
+    } else if format == AudioFormat::OGG {
+        &["-c:a", "libvorbis", "-q:a", "6"]
+    } else if format == AudioFormat::OPUS {
+        &["-c:a", "libopus", "-b:a", "160k"]
+    } else if format == AudioFormat::AAC {
+        &["-c:a", "aac", "-b:a", "192k"]
+    } else if format == AudioFormat::WMA {
+        &["-c:a", "wmav2", "-b:a", "192k"]
+    } else {
+        &[]
+    }
+}
+
 /// The minimum/maximum tempo a single `atempo` filter instance accepts.
 const ATEMPO_MIN: f32 = 0.5;
 const ATEMPO_MAX: f32 = 100.0;
@@ -274,6 +302,7 @@ pub fn process_audio_files(
                 .arg("-filter:a")
                 .arg(&atempo_filter)
                 .arg("-vn")
+                .args(encoder_args(detected_format))
                 .arg("-map_metadata")
                 .arg("0")
                 .arg(&output_file)

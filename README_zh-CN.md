@@ -68,6 +68,23 @@ fn main() -> std::io::Result<()> {
 }
 ```
 
+## 编码说明
+
+音频加速需要对音频流进行解码并重新编码。为避免 ffmpeg 默认编码参数导致的音质损失，本工具对每种格式显式指定编码器：
+
+| 格式 | 编码参数                        |
+| ---- | ------------------------------- |
+| FLAC | `flac`（无损）                  |
+| WAV  | `pcm_s24le`（无损）             |
+| ALAC | `alac`（无损）                  |
+| MP3  | `libmp3lame -q:a 2`（VBR ~190k）|
+| OGG  | `libvorbis -q:a 6`（~192k）     |
+| OPUS | `libopus -b:a 160k`             |
+| AAC  | `aac -b:a 192k`                 |
+| WMA  | `wmav2 -b:a 192k`               |
+
+这需要 ffmpeg 构建包含 `libmp3lame`、`libvorbis` 和 `libopus` 编码器（大多数完整版构建均已包含）。
+
 ## 系统要求
 
 - 必须安装 FFmpeg 并配置在系统 PATH 环境变量中

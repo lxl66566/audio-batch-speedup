@@ -65,6 +65,26 @@ fn main() -> std::io::Result<()> {
 }
 ```
 
+## Encoding
+
+Speeding up requires decoding and re-encoding the audio stream. To avoid the
+quality loss of ffmpeg's default per-container encoder settings, each format
+is re-encoded explicitly:
+
+| Format | Encoder settings                |
+| ------ | ------------------------------- |
+| FLAC   | `flac` (lossless)               |
+| WAV    | `pcm_s24le` (lossless)          |
+| ALAC   | `alac` (lossless)               |
+| MP3    | `libmp3lame -q:a 2` (VBR ~190k) |
+| OGG    | `libvorbis -q:a 6` (~192k)      |
+| OPUS   | `libopus -b:a 160k`             |
+| AAC    | `aac -b:a 192k`                 |
+| WMA    | `wmav2 -b:a 192k`               |
+
+This requires an ffmpeg build with the `libmp3lame`, `libvorbis`, and
+`libopus` encoders enabled (most full builds include them).
+
 ## Requirements
 
 - FFmpeg must be installed and available in the system PATH.
