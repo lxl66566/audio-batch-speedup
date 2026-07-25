@@ -167,6 +167,17 @@ pub fn process_audio_files(
         ));
     };
 
+    // Fail fast if ffmpeg is unavailable instead of erroring once per file.
+    match Command::new("ffmpeg").arg("-version").output() {
+        Ok(output) if output.status.success() => {}
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "ffmpeg is not installed or not available in PATH",
+            ));
+        }
+    }
+
     // Collect all files that need to be processed
     let files: Vec<_> = WalkDir::new(folder)
         .into_iter()
