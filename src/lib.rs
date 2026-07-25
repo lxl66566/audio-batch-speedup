@@ -61,8 +61,8 @@ fn detect_audio_format(path: &Path) -> Option<AudioFormat> {
     if &buffer[0..4] == b"OggS" {
         return Some(AudioFormat::OGG);
     }
-    // MP3 (ID3 tag or starts with 0xFF FB/FA)
-    if &buffer[0..3] == b"ID3" || (buffer[0] == 0xFF && (buffer[1] & 0xF6) == 0xF2) {
+    // MP3 (ID3 tag or MPEG frame sync: 11 sync bits set, i.e. 0xFF Ex/FA/FB)
+    if &buffer[0..3] == b"ID3" || (buffer[0] == 0xFF && (buffer[1] & 0xE0) == 0xE0) {
         return Some(AudioFormat::MP3);
     }
     // WAV (RIFF header with WAVE)
