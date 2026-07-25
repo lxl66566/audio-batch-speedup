@@ -42,6 +42,30 @@ impl Default for AudioFormat {
     }
 }
 
+impl std::str::FromStr for AudioFormat {
+    type Err = String;
+
+    /// Parses a format name (case-insensitive). Accepts codec names, common
+    /// file extensions (`m4a`), and `all` for every supported format.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "ogg" => Ok(Self::OGG),
+            "mp3" => Ok(Self::MP3),
+            "wav" => Ok(Self::WAV),
+            "flac" => Ok(Self::FLAC),
+            "aac" | "m4a" => Ok(Self::AAC),
+            "opus" => Ok(Self::OPUS),
+            "alac" => Ok(Self::ALAC),
+            "wma" => Ok(Self::WMA),
+            "all" => Ok(Self::ALL),
+            other => Err(format!(
+                "Unsupported format: {other}. Supported formats are: \
+                 ogg, mp3, wav, flac, aac, opus, alac, wma, all."
+            )),
+        }
+    }
+}
+
 /// Detects the audio format of a file based on its magic bytes or file extension.
 ///
 /// # Arguments
@@ -85,18 +109,11 @@ fn detect_audio_format(path: &Path) -> Option<AudioFormat> {
     }
 
     // Fallback to file extension
-    if let Some(extension) = path.extension().and_then(|s| s.to_str()) {
-        match extension.to_lowercase().as_str() {
-            "ogg" => return Some(AudioFormat::OGG),
-            "mp3" => return Some(AudioFormat::MP3),
-            "wav" => return Some(AudioFormat::WAV),
-            "flac" => return Some(AudioFormat::FLAC),
-            "m4a" | "aac" => return Some(AudioFormat::AAC),
-            "opus" => return Some(AudioFormat::OPUS),
-            "alac" => return Some(AudioFormat::ALAC),
-            "wma" => return Some(AudioFormat::WMA),
-            _ => {}
-        }
+    if let Some(extension) = path.extension().and_then(|s| s.to_str())
+        && let Ok(format) = extension.parse::<AudioFormat>()
+        && format != AudioFormat::ALL
+    {
+        return Some(format);
     }
 
     None
