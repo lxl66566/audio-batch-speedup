@@ -241,41 +241,18 @@ pub fn process_audio_files(
             };
             let output_file = temp_file.path().to_path_buf();
 
-            let input_path_str = match path.to_str() {
-                Some(s) => s,
-                None => {
-                    error!("Failed to convert input path to string: {}", path.display());
-                    error_count.fetch_add(1, Ordering::AcqRel);
-                    return;
-                }
-            };
-
-            let output_file_str = match output_file.to_str() {
-                Some(s) => s,
-                None => {
-                    error!(
-                        "Failed to convert output path to string: {}",
-                        output_file.display()
-                    );
-                    error_count.fetch_add(1, Ordering::AcqRel);
-                    return;
-                }
-            };
-
             let status = Command::new("ffmpeg")
-                .args([
-                    "-i",
-                    input_path_str,
-                    "-filter:a",
-                    &atempo_filter,
-                    "-vn",
-                    "-map_metadata",
-                    "0",
-                    output_file_str,
-                    "-y",
-                    "-loglevel",
-                    "error",
-                ])
+                .arg("-i")
+                .arg(path)
+                .arg("-filter:a")
+                .arg(&atempo_filter)
+                .arg("-vn")
+                .arg("-map_metadata")
+                .arg("0")
+                .arg(&output_file)
+                .arg("-y")
+                .arg("-loglevel")
+                .arg("error")
                 .status();
 
             match status {
