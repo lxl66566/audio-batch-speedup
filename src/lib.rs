@@ -304,6 +304,9 @@ pub fn process_audio_files(
 
     if errors > 0 {
         log::error!("Finished with {} errors.", errors);
+        return Err(std::io::Error::other(format!(
+            "{errors} file(s) failed to process"
+        )));
     }
     if skipped > 0 {
         log::info!("Skipped {} files.", skipped);
