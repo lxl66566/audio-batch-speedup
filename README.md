@@ -82,6 +82,11 @@ is re-encoded explicitly:
 | AAC    | `aac -b:a 192k`                 |
 | WMA    | `wmav2 -b:a 192k`               |
 
+For lossy formats, the output bitrate is capped at the source bitrate
+(detected via ffprobe) so that a speedup never inflates the file size;
+files with a source bitrate at or above the defaults use the settings above.
+If ffprobe is unavailable, the default settings are used for all files.
+
 This requires an ffmpeg build with the `libmp3lame`, `libvorbis`, and
 `libopus` encoders enabled (most full builds include them).
 

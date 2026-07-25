@@ -118,32 +118,76 @@ fn detect_audio_format(path: &Path) -> Option<AudioFormat> {
     None
 }
 
+/// Probes the audio bitrate (bits/s) of a file with ffprobe.
+///
+/// Returns `None` if the bitrate cannot be determined (ffprobe failure,
+/// missing stream, or an unparseable/`N/A` value).
+fn probe_audio_bitrate(path: &Path) -> Option<u64> {
+    let output = Command::new("ffprobe")
+        .arg("-v")
+        .arg("error")
+        .arg("-select_streams")
+        .arg("a:0")
+        .arg("-show_entries")
+        .arg("stream=bit_rate:format=bit_rate")
+        .arg("-of")
+        .arg("csv=p=0")
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().trim_matches(',').parse::<u64>().ok())
+        .find(|&bitrate| bitrate > 0)
+}
+
 /// Returns ffmpeg encoder arguments for the given format.
 ///
 /// Speeding up requires decoding + re-encoding (a filter cannot run on a
 /// copied stream), so ffmpeg's default per-container encoder settings would
-/// silently degrade quality. Lossless formats are re-encoded losslessly;
-/// lossy formats use high-quality settings to minimize generation loss.
-fn encoder_args(format: AudioFormat) -> &'static [&'static str] {
+/// silently degrade quality. Lossless formats are re-encoded losslessly.
+/// Lossy formats use high-quality settings to minimize generation loss, but
+/// the bitrate is capped at `source_bitrate` (when known) so that the output
+/// can never grow beyond what the speed change alone would yield.
+fn encoder_args(format: AudioFormat, source_bitrate: Option<u64>) -> Vec<String> {
     if format == AudioFormat::FLAC {
-        &["-c:a", "flac"]
-    } else if format == AudioFormat::WAV {
-        &["-c:a", "pcm_s24le"]
-    } else if format == AudioFormat::ALAC {
-        &["-c:a", "alac"]
-    } else if format == AudioFormat::MP3 {
-        &["-c:a", "libmp3lame", "-q:a", "2"]
-    } else if format == AudioFormat::OGG {
-        &["-c:a", "libvorbis", "-q:a", "6"]
-    } else if format == AudioFormat::OPUS {
-        &["-c:a", "libopus", "-b:a", "160k"]
-    } else if format == AudioFormat::AAC {
-        &["-c:a", "aac", "-b:a", "192k"]
-    } else if format == AudioFormat::WMA {
-        &["-c:a", "wmav2", "-b:a", "192k"]
-    } else {
-        &[]
+        return vec!["-c:a".into(), "flac".into()];
     }
+    if format == AudioFormat::WAV {
+        return vec!["-c:a".into(), "pcm_s24le".into()];
+    }
+    if format == AudioFormat::ALAC {
+        return vec!["-c:a".into(), "alac".into()];
+    }
+
+    // (encoder, default quality args, approximate default bitrate in kbps)
+    let (codec, default_args, default_kbps): (&str, &[&str], u64) =
+        if format == AudioFormat::MP3 {
+            ("libmp3lame", &["-q:a", "2"], 190)
+        } else if format == AudioFormat::OGG {
+            ("libvorbis", &["-q:a", "6"], 192)
+        } else if format == AudioFormat::OPUS {
+            ("libopus", &["-b:a", "160k"], 160)
+        } else if format == AudioFormat::AAC {
+            ("aac", &["-b:a", "192k"], 192)
+        } else if format == AudioFormat::WMA {
+            ("wmav2", &["-b:a", "192k"], 192)
+        } else {
+            return Vec::new();
+        };
+
+    let mut args = vec!["-c:a".to_string(), codec.to_string()];
+    match source_bitrate {
+        Some(bitrate) if bitrate < default_kbps * 1000 => {
+            args.push("-b:a".to_string());
+            args.push(bitrate.to_string());
+        }
+        _ => args.extend(default_args.iter().map(|&s| s.to_string())),
+    }
+    args
 }
 
 /// The minimum/maximum tempo a single `atempo` filter instance accepts.
@@ -222,6 +266,16 @@ pub fn process_audio_files(
         }
     }
 
+    // ffprobe is used to cap lossy output bitrate at the source bitrate. It
+    // is optional: without it we fall back to the default encoder settings.
+    let can_probe = Command::new("ffprobe")
+        .arg("-version")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !can_probe {
+        log::warn!("ffprobe not found in PATH; falling back to default encoder settings");
+    }
+
     // Collect all files that need to be processed
     let files: Vec<_> = WalkDir::new(folder)
         .into_iter()
@@ -296,13 +350,15 @@ pub fn process_audio_files(
             };
             let output_file = temp_file.path().to_path_buf();
 
+            let source_bitrate = can_probe.then(|| probe_audio_bitrate(path)).flatten();
+
             let status = Command::new("ffmpeg")
                 .arg("-i")
                 .arg(path)
                 .arg("-filter:a")
                 .arg(&atempo_filter)
                 .arg("-vn")
-                .args(encoder_args(detected_format))
+                .args(encoder_args(detected_format, source_bitrate))
                 .arg("-map_metadata")
                 .arg("0")
                 .arg(&output_file)

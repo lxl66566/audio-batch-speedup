@@ -83,6 +83,8 @@ fn main() -> std::io::Result<()> {
 | AAC  | `aac -b:a 192k`                 |
 | WMA  | `wmav2 -b:a 192k`               |
 
+对于有损格式，输出码率会被钳制在源码率（通过 ffprobe 检测）以内，确保加速后文件体积不会膨胀；源码率不低于上表默认值时使用默认高质量参数。若 ffprobe 不可用，则所有文件使用默认参数。
+
 这需要 ffmpeg 构建包含 `libmp3lame`、`libvorbis` 和 `libopus` 编码器（大多数完整版构建均已包含）。
 
 ## 系统要求
