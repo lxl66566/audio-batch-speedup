@@ -2,7 +2,6 @@
 
 use bitflags::bitflags;
 use indicatif::{ParallelProgressIterator, ProgressBar, ProgressStyle};
-use log::{debug, error};
 use rayon::prelude::*;
 use std::fs::File;
 use std::io::Read;
@@ -213,6 +212,15 @@ pub fn process_audio_files(
     let error_count = AtomicUsize::new(0);
     let skipped_count = AtomicUsize::new(0);
 
+    // Suspend the progress bar while logging so log lines don't interleave
+    // with the bar's redraw.
+    let log_pb = process_pb.clone();
+    macro_rules! log_suspended {
+        ($level:ident, $($arg:tt)*) => {
+            log_pb.suspend(|| log::$level!($($arg)*))
+        };
+    }
+
     // Process all files in parallel
     files
         .into_par_iter()
@@ -223,13 +231,13 @@ pub fn process_audio_files(
             let detected_format = detect_audio_format(path);
 
             let Some(detected_format) = detected_format else {
-                debug!("Skipping file (format not detected): {}", path.display());
+                log_suspended!(debug, "Skipping file (format not detected): {}", path.display());
                 skipped_count.fetch_add(1, Ordering::Relaxed);
                 return;
             };
 
             if !formats.contains(detected_format) {
-                debug!("Skipping file (format not selected): {}", path.display());
+                log_suspended!(debug, "Skipping file (format not selected): {}", path.display());
                 skipped_count.fetch_add(1, Ordering::Relaxed);
                 return;
             }
@@ -248,7 +256,12 @@ pub fn process_audio_files(
             {
                 Ok(f) => f,
                 Err(e) => {
-                    error!("Failed to create temp file for {}: {}", path.display(), e);
+                    log_suspended!(
+                        error,
+                        "Failed to create temp file for {}: {}",
+                        path.display(),
+                        e
+                    );
                     error_count.fetch_add(1, Ordering::Relaxed);
                     return;
                 }
@@ -273,7 +286,8 @@ pub fn process_audio_files(
                 Ok(exit_status) => {
                     if exit_status.success() {
                         if let Err(e) = std::fs::rename(&output_file, path) {
-                            error!(
+                            log_suspended!(
+                                error,
                                 "Error renaming file from {} to {}: {}",
                                 output_file.display(),
                                 path.display(),
@@ -282,7 +296,8 @@ pub fn process_audio_files(
                             error_count.fetch_add(1, Ordering::Relaxed);
                         }
                     } else {
-                        error!(
+                        log_suspended!(
+                            error,
                             "ffmpeg failed for {}. Exit code: {:?}",
                             path.display(),
                             exit_status.code()
@@ -292,7 +307,12 @@ pub fn process_audio_files(
                     }
                 }
                 Err(e) => {
-                    error!("Error executing ffmpeg for {}: {}", path.display(), e);
+                    log_suspended!(
+                        error,
+                        "Error executing ffmpeg for {}: {}",
+                        path.display(),
+                        e
+                    );
                     error_count.fetch_add(1, Ordering::Relaxed);
                     // The temp file is removed automatically on drop.
                 }
