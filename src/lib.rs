@@ -1,14 +1,20 @@
 #![warn(clippy::cargo)]
 
+use std::{
+    fs::File,
+    io::Read,
+    path::Path,
+    process::Command,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
+
 use bitflags::bitflags;
-use indicatif::{ParallelProgressIterator, ProgressBar, ProgressStyle};
-use rayon::prelude::*;
-use std::fs::File;
-use std::io::Read;
-use std::path::Path;
-use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use indicatif::{ProgressBar, ProgressStyle};
 use walkdir::WalkDir;
+use youpipe::{Workload, pipe};
 
 bitflags! {
     /// Represents the supported audio formats for processing.
@@ -65,7 +71,8 @@ impl std::str::FromStr for AudioFormat {
     }
 }
 
-/// Detects the audio format of a file based on its magic bytes or file extension.
+/// Detects the audio format of a file based on its magic bytes or file
+/// extension.
 ///
 /// # Arguments
 ///
@@ -73,7 +80,8 @@ impl std::str::FromStr for AudioFormat {
 ///
 /// # Returns
 ///
-/// * `Option<AudioFormat>` - The detected audio format, or `None` if it cannot be determined.
+/// * `Option<AudioFormat>` - The detected audio format, or `None` if it cannot
+///   be determined.
 fn detect_audio_format(path: &Path) -> Option<AudioFormat> {
     // Try to detect by magic bytes first
     let mut file = File::open(path).ok()?;
@@ -97,8 +105,8 @@ fn detect_audio_format(path: &Path) -> Option<AudioFormat> {
         return Some(AudioFormat::FLAC);
     }
     // AAC (often in MP4/M4A containers, which start with 'ftyp' or 'moov')
-    // This is harder to detect purely by magic bytes without parsing the container.
-    // We'll rely more on extension for AAC/M4A.
+    // This is harder to detect purely by magic bytes without parsing the
+    // container. We'll rely more on extension for AAC/M4A.
     // OPUS (often in Ogg containers, so OggS will catch it, or WebM)
     // ALAC (often in MP4/M4A containers)
     // WMA (ASF header)
@@ -164,20 +172,19 @@ fn encoder_args(format: AudioFormat, source_bitrate: Option<u64>) -> Vec<String>
     }
 
     // (encoder, default quality args, approximate default bitrate in kbps)
-    let (codec, default_args, default_kbps): (&str, &[&str], u64) =
-        if format == AudioFormat::MP3 {
-            ("libmp3lame", &["-q:a", "2"], 190)
-        } else if format == AudioFormat::OGG {
-            ("libvorbis", &["-q:a", "6"], 192)
-        } else if format == AudioFormat::OPUS {
-            ("libopus", &["-b:a", "160k"], 160)
-        } else if format == AudioFormat::AAC {
-            ("aac", &["-b:a", "192k"], 192)
-        } else if format == AudioFormat::WMA {
-            ("wmav2", &["-b:a", "192k"], 192)
-        } else {
-            return Vec::new();
-        };
+    let (codec, default_args, default_kbps): (&str, &[&str], u64) = if format == AudioFormat::MP3 {
+        ("libmp3lame", &["-q:a", "2"], 190)
+    } else if format == AudioFormat::OGG {
+        ("libvorbis", &["-q:a", "6"], 192)
+    } else if format == AudioFormat::OPUS {
+        ("libopus", &["-b:a", "160k"], 160)
+    } else if format == AudioFormat::AAC {
+        ("aac", &["-b:a", "192k"], 192)
+    } else if format == AudioFormat::WMA {
+        ("wmav2", &["-b:a", "192k"], 192)
+    } else {
+        return Vec::new();
+    };
 
     let mut args = vec!["-c:a".to_string(), codec.to_string()];
     match source_bitrate {
@@ -218,7 +225,139 @@ fn build_atempo_filter(speed: f32) -> Option<String> {
     Some(parts.join(","))
 }
 
-/// Process all audio files in the specified folder recursively with the given speed multiplier.
+/// Processes one audio file in place: re-encodes it sped up by `atempo_filter`
+/// into a sibling temp file, then renames over the original.
+///
+/// Failures are logged and counted instead of propagated, so one bad file
+/// never aborts the batch.
+fn process_file(
+    path: &Path,
+    atempo_filter: &str,
+    formats: AudioFormat,
+    can_probe: bool,
+    pb: &ProgressBar,
+    error_count: &AtomicUsize,
+    skipped_count: &AtomicUsize,
+) {
+    // Suspend the progress bar while logging so log lines don't interleave
+    // with the bar's redraw.
+    macro_rules! log_suspended {
+        ($level:ident, $($arg:tt)*) => {
+            pb.suspend(|| log::$level!($($arg)*))
+        };
+    }
+
+    let Some(detected_format) = detect_audio_format(path) else {
+        log_suspended!(
+            debug,
+            "Skipping file (format not detected): {}",
+            path.display()
+        );
+        skipped_count.fetch_add(1, Ordering::Relaxed);
+        return;
+    };
+
+    if !formats.contains(detected_format) {
+        log_suspended!(
+            debug,
+            "Skipping file (format not selected): {}",
+            path.display()
+        );
+        skipped_count.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+
+    // Create a uniquely-named temp file in the same directory (so the
+    // final rename stays on one filesystem). The original extension is
+    // kept as the suffix so ffmpeg can infer the output container.
+    let suffix = path
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let temp_file = match tempfile::Builder::new()
+        .prefix(".abs_")
+        .suffix(&suffix)
+        .tempfile_in(path.parent().unwrap_or(Path::new(".")))
+    {
+        Ok(f) => f,
+        Err(e) => {
+            log_suspended!(
+                error,
+                "Failed to create temp file for {}: {}",
+                path.display(),
+                e
+            );
+            error_count.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+    };
+    let output_file = temp_file.path().to_path_buf();
+
+    let source_bitrate = can_probe.then(|| probe_audio_bitrate(path)).flatten();
+
+    let status = Command::new("ffmpeg")
+        // Batch mode keeps one ffmpeg per CPU core busy; intra-process
+        // threading would only oversubscribe the machine, so decode,
+        // filtergraph and encode are all pinned to a single thread.
+        .arg("-threads")
+        .arg("1")
+        .arg("-filter_threads")
+        .arg("1")
+        .arg("-i")
+        .arg(path)
+        .arg("-filter:a")
+        .arg(atempo_filter)
+        .arg("-vn")
+        .args(encoder_args(detected_format, source_bitrate))
+        .arg("-threads")
+        .arg("1")
+        .arg("-map_metadata")
+        .arg("0")
+        .arg(&output_file)
+        .arg("-y")
+        .arg("-loglevel")
+        .arg("error")
+        .status();
+
+    match status {
+        Ok(exit_status) => {
+            if exit_status.success() {
+                if let Err(e) = std::fs::rename(&output_file, path) {
+                    log_suspended!(
+                        error,
+                        "Error renaming file from {} to {}: {}",
+                        output_file.display(),
+                        path.display(),
+                        e
+                    );
+                    error_count.fetch_add(1, Ordering::Relaxed);
+                }
+            } else {
+                log_suspended!(
+                    error,
+                    "ffmpeg failed for {}. Exit code: {:?}",
+                    path.display(),
+                    exit_status.code()
+                );
+                error_count.fetch_add(1, Ordering::Relaxed);
+                // The temp file is removed automatically on drop.
+            }
+        }
+        Err(e) => {
+            log_suspended!(
+                error,
+                "Error executing ffmpeg for {}: {}",
+                path.display(),
+                e
+            );
+            error_count.fetch_add(1, Ordering::Relaxed);
+            // The temp file is removed automatically on drop.
+        }
+    }
+}
+
+/// Process all audio files in the specified folder recursively with the given
+/// speed multiplier.
 ///
 /// # Arguments
 ///
@@ -291,117 +430,29 @@ pub fn process_audio_files(
             .progress_chars("#>-"),
     );
 
-    let error_count = AtomicUsize::new(0);
-    let skipped_count = AtomicUsize::new(0);
+    let error_count = Arc::new(AtomicUsize::new(0));
+    let skipped_count = Arc::new(AtomicUsize::new(0));
 
-    // Suspend the progress bar while logging so log lines don't interleave
-    // with the bar's redraw.
-    let log_pb = process_pb.clone();
-    macro_rules! log_suspended {
-        ($level:ident, $($arg:tt)*) => {
-            log_pb.suspend(|| log::$level!($($arg)*))
-        };
-    }
-
-    // Process all files in parallel
-    files
-        .into_par_iter()
-        .progress_with(process_pb.clone())
-        .for_each(|entry| {
-            let path = entry.path();
-
-            let detected_format = detect_audio_format(path);
-
-            let Some(detected_format) = detected_format else {
-                log_suspended!(debug, "Skipping file (format not detected): {}", path.display());
-                skipped_count.fetch_add(1, Ordering::Relaxed);
-                return;
-            };
-
-            if !formats.contains(detected_format) {
-                log_suspended!(debug, "Skipping file (format not selected): {}", path.display());
-                skipped_count.fetch_add(1, Ordering::Relaxed);
-                return;
-            }
-
-            // Create a uniquely-named temp file in the same directory (so the
-            // final rename stays on one filesystem). The original extension is
-            // kept as the suffix so ffmpeg can infer the output container.
-            let suffix = path
-                .extension()
-                .map(|e| format!(".{}", e.to_string_lossy()))
-                .unwrap_or_default();
-            let temp_file = match tempfile::Builder::new()
-                .prefix(".abs_")
-                .suffix(&suffix)
-                .tempfile_in(path.parent().unwrap_or(Path::new(".")))
-            {
-                Ok(f) => f,
-                Err(e) => {
-                    log_suspended!(
-                        error,
-                        "Failed to create temp file for {}: {}",
-                        path.display(),
-                        e
-                    );
-                    error_count.fetch_add(1, Ordering::Relaxed);
-                    return;
-                }
-            };
-            let output_file = temp_file.path().to_path_buf();
-
-            let source_bitrate = can_probe.then(|| probe_audio_bitrate(path)).flatten();
-
-            let status = Command::new("ffmpeg")
-                .arg("-i")
-                .arg(path)
-                .arg("-filter:a")
-                .arg(&atempo_filter)
-                .arg("-vn")
-                .args(encoder_args(detected_format, source_bitrate))
-                .arg("-map_metadata")
-                .arg("0")
-                .arg(&output_file)
-                .arg("-y")
-                .arg("-loglevel")
-                .arg("error")
-                .status();
-
-            match status {
-                Ok(exit_status) => {
-                    if exit_status.success() {
-                        if let Err(e) = std::fs::rename(&output_file, path) {
-                            log_suspended!(
-                                error,
-                                "Error renaming file from {} to {}: {}",
-                                output_file.display(),
-                                path.display(),
-                                e
-                            );
-                            error_count.fetch_add(1, Ordering::Relaxed);
-                        }
-                    } else {
-                        log_suspended!(
-                            error,
-                            "ffmpeg failed for {}. Exit code: {:?}",
-                            path.display(),
-                            exit_status.code()
-                        );
-                        error_count.fetch_add(1, Ordering::Relaxed);
-                        // The temp file is removed automatically on drop.
-                    }
-                }
-                Err(e) => {
-                    log_suspended!(
-                        error,
-                        "Error executing ffmpeg for {}: {}",
-                        path.display(),
-                        e
-                    );
-                    error_count.fetch_add(1, Ordering::Relaxed);
-                    // The temp file is removed automatically on drop.
-                }
-            }
+    // One single-threaded ffmpeg per core saturates the CPU: the pool defaults
+    // to one worker per core and each worker blocks on one ffmpeg at a time.
+    // File durations are uneven, so allow fine-grained stealing to shrink the
+    // tail.
+    let item_error_count = Arc::clone(&error_count);
+    let item_skipped_count = Arc::clone(&skipped_count);
+    let item_pb = process_pb.clone();
+    pipe(files)
+        .with_workload(Workload::Unbalanced)
+        .for_each(move |entry| {
+            process_file(
+                entry.path(),
+                &atempo_filter,
+                formats,
+                can_probe,
+                &item_pb,
+                &item_error_count,
+                &item_skipped_count,
+            );
+            item_pb.inc(1);
         });
 
     process_pb.finish_with_message("Processing complete!");
