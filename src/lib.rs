@@ -64,8 +64,8 @@ impl std::str::FromStr for AudioFormat {
             "wma" => Ok(Self::WMA),
             "all" => Ok(Self::ALL),
             other => Err(format!(
-                "Unsupported format: {other}. Supported formats are: \
-                 ogg, mp3, wav, flac, aac, opus, alac, wma, all."
+                "Unsupported format: {other}. Supported formats are: ogg, mp3, wav, flac, aac, \
+                 opus, alac, wma, all."
             )),
         }
     }
@@ -80,8 +80,7 @@ impl std::str::FromStr for AudioFormat {
 ///
 /// # Returns
 ///
-/// * `Option<AudioFormat>` - The detected audio format, or `None` if it cannot
-///   be determined.
+/// * `Option<AudioFormat>` - The detected audio format, or `None` if it cannot be determined.
 fn detect_audio_format(path: &Path) -> Option<AudioFormat> {
     // Try to detect by magic bytes first
     let mut file = File::open(path).ok()?;
@@ -93,7 +92,7 @@ fn detect_audio_format(path: &Path) -> Option<AudioFormat> {
         return Some(AudioFormat::OGG);
     }
     // MP3 (ID3 tag or MPEG frame sync: 11 sync bits set, i.e. 0xFF Ex/FA/FB)
-    if &buffer[0..3] == b"ID3" || (buffer[0] == 0xFF && (buffer[1] & 0xE0) == 0xE0) {
+    if &buffer[0..3] == b"ID3" || (buffer[0] == 0xff && (buffer[1] & 0xe0) == 0xe0) {
         return Some(AudioFormat::MP3);
     }
     // WAV (RIFF header with WAVE)
@@ -110,7 +109,7 @@ fn detect_audio_format(path: &Path) -> Option<AudioFormat> {
     // OPUS (often in Ogg containers, so OggS will catch it, or WebM)
     // ALAC (often in MP4/M4A containers)
     // WMA (ASF header)
-    if buffer[0..4] == [0x30, 0x26, 0xB2, 0x75] {
+    if buffer[0..4] == [0x30, 0x26, 0xb2, 0x75] {
         // GUID for ASF header
         return Some(AudioFormat::WMA);
     }
@@ -191,7 +190,7 @@ fn encoder_args(format: AudioFormat, source_bitrate: Option<u64>) -> Vec<String>
         Some(bitrate) if bitrate < default_kbps * 1000 => {
             args.push("-b:a".to_string());
             args.push(bitrate.to_string());
-        }
+        },
         _ => args.extend(default_args.iter().map(|&s| s.to_string())),
     }
     args
@@ -289,7 +288,7 @@ fn process_file(
             );
             error_count.fetch_add(1, Ordering::Relaxed);
             return;
-        }
+        },
     };
     let output_file = temp_file.path().to_path_buf();
 
@@ -342,7 +341,7 @@ fn process_file(
                 error_count.fetch_add(1, Ordering::Relaxed);
                 // The temp file is removed automatically on drop.
             }
-        }
+        },
         Err(e) => {
             log_suspended!(
                 error,
@@ -352,7 +351,7 @@ fn process_file(
             );
             error_count.fetch_add(1, Ordering::Relaxed);
             // The temp file is removed automatically on drop.
-        }
+        },
     }
 }
 
@@ -373,7 +372,8 @@ fn process_file(
 ///
 /// ```no_run
 /// use std::path::Path;
-/// use audio_batch_speedup::{process_audio_files, AudioFormat};
+///
+/// use audio_batch_speedup::{AudioFormat, process_audio_files};
 ///
 /// let folder = Path::new("path/to/audio/files");
 /// let speed = 1.5;
@@ -396,13 +396,13 @@ pub fn process_audio_files(
 
     // Fail fast if ffmpeg is unavailable instead of erroring once per file.
     match Command::new("ffmpeg").arg("-version").output() {
-        Ok(output) if output.status.success() => {}
+        Ok(output) if output.status.success() => {},
         _ => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 "ffmpeg is not installed or not available in PATH",
             ));
-        }
+        },
     }
 
     // ffprobe is used to cap lossy output bitrate at the source bitrate. It
@@ -418,14 +418,17 @@ pub fn process_audio_files(
     // Collect all files that need to be processed
     let files: Vec<_> = WalkDir::new(folder)
         .into_iter()
-        .filter_map(|e| e.ok())
+        .filter_map(Result::ok)
         .filter(|e| e.path().is_file()) // Only count files for the progress bar
         .collect();
 
     let process_pb = ProgressBar::new(files.len() as u64);
     process_pb.set_style(
         ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
+            .template(
+                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) \
+                 {msg}",
+            )
             .expect("Internal Error: Failed to set progress bar style")
             .progress_chars("#>-"),
     );
@@ -461,13 +464,13 @@ pub fn process_audio_files(
     let skipped = skipped_count.load(Ordering::Relaxed);
 
     if errors > 0 {
-        log::error!("Finished with {} errors.", errors);
+        log::error!("Finished with {errors} errors.");
         return Err(std::io::Error::other(format!(
             "{errors} file(s) failed to process"
         )));
     }
     if skipped > 0 {
-        log::info!("Skipped {} files.", skipped);
+        log::info!("Skipped {skipped} files.");
     }
 
     Ok(())
