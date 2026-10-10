@@ -100,9 +100,20 @@ fn detect_audio_format(path: &Path) -> Option<AudioFormat> {
             _ => AudioFormat::OGG,
         });
     }
-    // MP3 (ID3 tag or MPEG frame sync: 11 sync bits set, i.e. 0xFF Ex/FA/FB)
-    if head.starts_with(b"ID3") || matches!(head, [0xff, b1, ..] if (b1 & 0xe0) == 0xe0) {
+    // MP3 (ID3 tag)
+    if head.starts_with(b"ID3") {
         return Some(AudioFormat::MP3);
+    }
+    // MPEG audio frame sync (11 set bits). The layer bits separate the two
+    // families sharing this sync word: ADTS AAC uses layer 00 (a reserved
+    // value for MPEG audio) while MP3 uses layer I/II/III.
+    if let [0xff, b1, ..] = head {
+        if b1 & 0xf6 == 0xf0 {
+            return Some(AudioFormat::AAC);
+        }
+        if b1 & 0xe0 == 0xe0 && b1 & 0x06 != 0 {
+            return Some(AudioFormat::MP3);
+        }
     }
     // WAV (RIFF header with WAVE)
     if head.len() >= 12 && &head[..4] == b"RIFF" && &head[8..12] == b"WAVE" {
@@ -652,6 +663,18 @@ mod tests {
         mp3.extend_from_slice(&[0; 20]);
         let path = write_in(dir.path(), "a.mp3", &mp3);
         assert_eq!(detect_audio_format(&path), Some(AudioFormat::MP3));
+
+        // ADTS AAC frame sync with layer bits 00 (0xFF 0xF1 / 0xFF 0xF9).
+        for b1 in [0xf1, 0xf9] {
+            let mut adts = vec![0xff, b1, 0x50, 0x80];
+            adts.extend_from_slice(&[0; 20]);
+            let path = write_in(dir.path(), "a.aac", &adts);
+            assert_eq!(
+                detect_audio_format(&path),
+                Some(AudioFormat::AAC),
+                "ADTS sync byte {b1:#x}"
+            );
+        }
     }
 
     #[test]
