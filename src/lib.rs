@@ -85,13 +85,20 @@ fn detect_audio_format(path: &Path) -> Option<AudioFormat> {
     // Try to detect by magic bytes first. Files shorter than the read window
     // are judged on the bytes they actually contain.
     let mut file = File::open(path).ok()?;
-    let mut buffer = [0; 12]; // Read enough bytes for common headers
+    // Read enough bytes for common headers and the first Ogg packet header.
+    let mut buffer = [0; 64];
     let n = file.read(&mut buffer).ok()?;
     let head = &buffer[..n];
 
-    // OGG (OggS)
+    // OGG (OggS). Opus carries an "OpusHead" ID header as the first packet
+    // of the first page, starting at offset 28 (27-byte Ogg page header +
+    // 1 segment-table entry); anything else in an Ogg container is treated
+    // as Vorbis.
     if head.starts_with(b"OggS") {
-        return Some(AudioFormat::OGG);
+        return Some(match head.get(28..36) {
+            Some(b"OpusHead") => AudioFormat::OPUS,
+            _ => AudioFormat::OGG,
+        });
     }
     // MP3 (ID3 tag or MPEG frame sync: 11 sync bits set, i.e. 0xFF Ex/FA/FB)
     if head.starts_with(b"ID3") || matches!(head, [0xff, b1, ..] if (b1 & 0xe0) == 0xe0) {
@@ -108,7 +115,6 @@ fn detect_audio_format(path: &Path) -> Option<AudioFormat> {
     // AAC (often in MP4/M4A containers, which start with 'ftyp' or 'moov')
     // This is harder to detect purely by magic bytes without parsing the
     // container. We'll rely more on extension for AAC/M4A.
-    // OPUS (often in Ogg containers, so OggS will catch it, or WebM)
     // ALAC (often in MP4/M4A containers)
     // WMA (ASF header)
     if head.starts_with(&[0x30, 0x26, 0xb2, 0x75]) {
@@ -597,6 +603,14 @@ mod tests {
     #[test]
     fn detect_format_by_magic_bytes() {
         let dir = tempfile::tempdir().expect("create temp dir");
+
+        // Ogg Opus: "OpusHead" ID header at offset 28.
+        let mut opus = vec![0; 28];
+        opus[..4].copy_from_slice(b"OggS");
+        opus.extend_from_slice(b"OpusHead");
+        opus.extend_from_slice(&[0; 16]);
+        let path = write_in(dir.path(), "a.opus", &opus);
+        assert_eq!(detect_audio_format(&path), Some(AudioFormat::OPUS));
 
         // Ogg Vorbis: first packet starts at offset 28 (27-byte page header
         // + 1 segment-table entry).
