@@ -77,11 +77,13 @@ impl std::str::FromStr for AudioFormat {
 /// # Arguments
 ///
 /// * `path` - The path to the audio file.
+/// * `can_probe` - Whether ffprobe may be used to disambiguate formats that neither magic bytes nor
+///   the extension can distinguish (ALAC vs AAC in the mp4 family).
 ///
 /// # Returns
 ///
 /// * `Option<AudioFormat>` - The detected audio format, or `None` if it cannot be determined.
-fn detect_audio_format(path: &Path) -> Option<AudioFormat> {
+fn detect_audio_format(path: &Path, can_probe: bool) -> Option<AudioFormat> {
     // Try to detect by magic bytes first. Files shorter than the read window
     // are judged on the bytes they actually contain.
     let mut file = File::open(path).ok()?;
@@ -126,22 +128,53 @@ fn detect_audio_format(path: &Path) -> Option<AudioFormat> {
     // AAC (often in MP4/M4A containers, which start with 'ftyp' or 'moov')
     // This is harder to detect purely by magic bytes without parsing the
     // container. We'll rely more on extension for AAC/M4A.
-    // ALAC (often in MP4/M4A containers)
     // WMA (ASF header)
     if head.starts_with(&[0x30, 0x26, 0xb2, 0x75]) {
         // GUID for ASF header
         return Some(AudioFormat::WMA);
     }
 
-    // Fallback to file extension
+    // Fallback to file extension. The mp4 family (`.m4a`/`.aac`) can hold
+    // either AAC or ALAC, which magic bytes cannot distinguish, so consult
+    // ffprobe when it is available; otherwise assume AAC.
     if let Some(extension) = path.extension().and_then(|s| s.to_str())
         && let Ok(format) = extension.parse::<AudioFormat>()
         && format != AudioFormat::ALL
     {
+        if format == AudioFormat::AAC
+            && can_probe
+            && probe_audio_codec(path).as_deref() == Some("alac")
+        {
+            return Some(AudioFormat::ALAC);
+        }
         return Some(format);
     }
 
     None
+}
+
+/// Probes the codec name of the first audio stream with ffprobe.
+///
+/// Returns `None` if the codec cannot be determined (ffprobe failure or a
+/// missing stream).
+fn probe_audio_codec(path: &Path) -> Option<String> {
+    let output = Command::new("ffprobe")
+        .arg("-v")
+        .arg("error")
+        .arg("-select_streams")
+        .arg("a:0")
+        .arg("-show_entries")
+        .arg("stream=codec_name")
+        .arg("-of")
+        .arg("csv=p=0")
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let codec = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!codec.is_empty()).then_some(codec)
 }
 
 /// Probes the audio bitrate (bits/s) of a file with ffprobe.
@@ -265,7 +298,7 @@ fn process_file(
         };
     }
 
-    let Some(detected_format) = detect_audio_format(path) else {
+    let Some(detected_format) = detect_audio_format(path, can_probe) else {
         log_suspended!(
             debug,
             "Skipping file (format not detected): {}",
@@ -621,7 +654,7 @@ mod tests {
         opus.extend_from_slice(b"OpusHead");
         opus.extend_from_slice(&[0; 16]);
         let path = write_in(dir.path(), "a.opus", &opus);
-        assert_eq!(detect_audio_format(&path), Some(AudioFormat::OPUS));
+        assert_eq!(detect_audio_format(&path, false), Some(AudioFormat::OPUS));
 
         // Ogg Vorbis: first packet starts at offset 28 (27-byte page header
         // + 1 segment-table entry).
@@ -630,19 +663,19 @@ mod tests {
         vorbis.extend_from_slice(b"\x01vorbis");
         vorbis.extend_from_slice(&[0; 16]);
         let path = write_in(dir.path(), "a.ogg", &vorbis);
-        assert_eq!(detect_audio_format(&path), Some(AudioFormat::OGG));
+        assert_eq!(detect_audio_format(&path, false), Some(AudioFormat::OGG));
 
         let mut wav = b"RIFF".to_vec();
         wav.extend_from_slice(&[0; 4]);
         wav.extend_from_slice(b"WAVE");
         wav.extend_from_slice(&[0; 8]);
         let path = write_in(dir.path(), "a.wav", &wav);
-        assert_eq!(detect_audio_format(&path), Some(AudioFormat::WAV));
+        assert_eq!(detect_audio_format(&path, false), Some(AudioFormat::WAV));
 
         let mut flac = b"fLaC".to_vec();
         flac.extend_from_slice(&[0; 8]);
         let path = write_in(dir.path(), "a.flac", &flac);
-        assert_eq!(detect_audio_format(&path), Some(AudioFormat::FLAC));
+        assert_eq!(detect_audio_format(&path, false), Some(AudioFormat::FLAC));
 
         // ASF header GUID.
         let mut wma = vec![
@@ -651,18 +684,18 @@ mod tests {
         ];
         wma.extend_from_slice(&[0; 16]);
         let path = write_in(dir.path(), "a.wma", &wma);
-        assert_eq!(detect_audio_format(&path), Some(AudioFormat::WMA));
+        assert_eq!(detect_audio_format(&path, false), Some(AudioFormat::WMA));
 
         let mut id3 = b"ID3".to_vec();
         id3.extend_from_slice(&[0; 20]);
         let path = write_in(dir.path(), "a.mp3", &id3);
-        assert_eq!(detect_audio_format(&path), Some(AudioFormat::MP3));
+        assert_eq!(detect_audio_format(&path, false), Some(AudioFormat::MP3));
 
         // MPEG frame sync with layer bits set (0xFF 0xFB).
         let mut mp3 = vec![0xff, 0xfb, 0x90, 0x00];
         mp3.extend_from_slice(&[0; 20]);
         let path = write_in(dir.path(), "a.mp3", &mp3);
-        assert_eq!(detect_audio_format(&path), Some(AudioFormat::MP3));
+        assert_eq!(detect_audio_format(&path, false), Some(AudioFormat::MP3));
 
         // ADTS AAC frame sync with layer bits 00 (0xFF 0xF1 / 0xFF 0xF9).
         for b1 in [0xf1, 0xf9] {
@@ -670,7 +703,7 @@ mod tests {
             adts.extend_from_slice(&[0; 20]);
             let path = write_in(dir.path(), "a.aac", &adts);
             assert_eq!(
-                detect_audio_format(&path),
+                detect_audio_format(&path, false),
                 Some(AudioFormat::AAC),
                 "ADTS sync byte {b1:#x}"
             );
@@ -682,10 +715,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("create temp dir");
         // A 3-byte ID3 fragment plus the .mp3 extension is still an MP3.
         let path = write_in(dir.path(), "a.mp3", b"ID3");
-        assert_eq!(detect_audio_format(&path), Some(AudioFormat::MP3));
+        assert_eq!(detect_audio_format(&path, false), Some(AudioFormat::MP3));
         // Truncated magic falls back to the extension.
         let path = write_in(dir.path(), "b.wav", b"RIFF");
-        assert_eq!(detect_audio_format(&path), Some(AudioFormat::WAV));
+        assert_eq!(detect_audio_format(&path, false), Some(AudioFormat::WAV));
     }
 
     #[test]
@@ -697,10 +730,10 @@ mod tests {
         m4a.extend_from_slice(b"ftypM4A ");
         m4a.extend_from_slice(&[0; 8]);
         let path = write_in(dir.path(), "a.m4a", &m4a);
-        assert_eq!(detect_audio_format(&path), Some(AudioFormat::AAC));
+        assert_eq!(detect_audio_format(&path, false), Some(AudioFormat::AAC));
 
         // Garbage without a known extension is undetectable.
         let path = write_in(dir.path(), "noext", &[0x01; 20]);
-        assert_eq!(detect_audio_format(&path), None);
+        assert_eq!(detect_audio_format(&path, false), None);
     }
 }
