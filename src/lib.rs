@@ -1,5 +1,3 @@
-#![warn(clippy::cargo)]
-
 use std::{
     ffi::OsStr,
     fs::File,
@@ -26,7 +24,7 @@ bitflags! {
         const OGG = 1 << 0;
         /// MPEG Audio Layer III (MP3) format.
         const MP3 = 1 << 1;
-        /// Waveform Audio File Format (WAV).
+        /// Waveform Audio File Format (WAV) format.
         const WAV = 1 << 2;
         /// Free Lossless Audio Codec (FLAC) format.
         const FLAC = 1 << 3;
@@ -43,9 +41,42 @@ bitflags! {
     }
 }
 
+// bitflags has no `#[default]` flag support, so a derive would default to
+// the empty set; the manual impl keeps ALL as the default.
 impl Default for AudioFormat {
     fn default() -> Self {
         Self::ALL
+    }
+}
+
+impl AudioFormat {
+    /// Parse table: (name, format) pairs; `m4a` is an `aac` alias.
+    const NAME_TABLE: [(&str, Self); 10] = [
+        ("ogg", Self::OGG),
+        ("mp3", Self::MP3),
+        ("wav", Self::WAV),
+        ("flac", Self::FLAC),
+        ("aac", Self::AAC),
+        ("m4a", Self::AAC),
+        ("opus", Self::OPUS),
+        ("alac", Self::ALAC),
+        ("wma", Self::WMA),
+        ("all", Self::ALL),
+    ];
+
+    /// The first name listed for each format (the canonical one); aliases
+    /// are excluded. Used for user-facing name lists. Comparison is by
+    /// exact value because `ALL` contains every other format.
+    fn canonical_names() -> Vec<&'static str> {
+        let mut seen: Vec<Self> = Vec::new();
+        let mut names = Vec::new();
+        for &(name, format) in &Self::NAME_TABLE {
+            if !seen.contains(&format) {
+                seen.push(format);
+                names.push(name);
+            }
+        }
+        names
     }
 }
 
@@ -55,21 +86,14 @@ impl std::str::FromStr for AudioFormat {
     /// Parses a format name (case-insensitive). Accepts codec names, common
     /// file extensions (`m4a`), and `all` for every supported format.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim().to_lowercase().as_str() {
-            "ogg" => Ok(Self::OGG),
-            "mp3" => Ok(Self::MP3),
-            "wav" => Ok(Self::WAV),
-            "flac" => Ok(Self::FLAC),
-            "aac" | "m4a" => Ok(Self::AAC),
-            "opus" => Ok(Self::OPUS),
-            "alac" => Ok(Self::ALAC),
-            "wma" => Ok(Self::WMA),
-            "all" => Ok(Self::ALL),
-            other => Err(format!(
-                "Unsupported format: {other}. Supported formats are: ogg, mp3, wav, flac, aac, \
-                 opus, alac, wma, all."
-            )),
+        let name = s.trim().to_lowercase();
+        if let Some(&(_, format)) = Self::NAME_TABLE.iter().find(|&&(n, _)| n == name) {
+            return Ok(format);
         }
+        Err(format!(
+            "Unsupported format: {s}. Supported formats are: {}.",
+            Self::canonical_names().join(", ")
+        ))
     }
 }
 
