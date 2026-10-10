@@ -370,7 +370,16 @@ fn process_file(
     };
     let output_file = temp_file.path().to_path_buf();
 
-    let source_bitrate = can_probe.then(|| probe_audio_bitrate(path)).flatten();
+    // Only lossy re-encodes consume the source bitrate; lossless formats
+    // ignore it, so their ffprobe round trip is skipped.
+    let lossy_formats = AudioFormat::MP3
+        | AudioFormat::OGG
+        | AudioFormat::OPUS
+        | AudioFormat::AAC
+        | AudioFormat::WMA;
+    let source_bitrate = (can_probe && lossy_formats.contains(detected_format))
+        .then(|| probe_audio_bitrate(path))
+        .flatten();
 
     // stdout/stderr are captured instead of inherited so ffmpeg diagnostics
     // never interleave with the progress bar; they are only logged on
