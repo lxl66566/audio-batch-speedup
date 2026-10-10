@@ -249,6 +249,21 @@ fn encoder_args(format: AudioFormat, source_bitrate: Option<u64>) -> Vec<String>
     args
 }
 
+/// Returns at most the last `max_lines` lines of `text`, to keep failure
+/// logs concise.
+fn tail_lines(text: &str, max_lines: usize) -> &str {
+    if max_lines == 0 {
+        return "";
+    }
+    let start = text
+        .char_indices()
+        .rev()
+        .filter(|&(_, ch)| ch == '\n')
+        .nth(max_lines)
+        .map_or(0, |(i, _)| i + 1);
+    &text[start..]
+}
+
 /// The minimum/maximum tempo a single `atempo` filter instance accepts.
 const ATEMPO_MIN: f32 = 0.5;
 const ATEMPO_MAX: f32 = 100.0;
@@ -357,7 +372,13 @@ fn process_file(
 
     let source_bitrate = can_probe.then(|| probe_audio_bitrate(path)).flatten();
 
-    let status = Command::new("ffmpeg")
+    // stdout/stderr are captured instead of inherited so ffmpeg diagnostics
+    // never interleave with the progress bar; they are only logged on
+    // failure.
+    let output = Command::new("ffmpeg")
+        // Parallel workers run many ffmpeg processes at once; none of them
+        // may read the terminal's stdin.
+        .arg("-nostdin")
         // Batch mode keeps one ffmpeg per CPU core busy; intra-process
         // threading would only oversubscribe the machine, so decode,
         // filtergraph and encode are all pinned to a single thread.
@@ -379,31 +400,35 @@ fn process_file(
         .arg("-y")
         .arg("-loglevel")
         .arg("error")
-        .status();
+        .output();
 
-    match status {
-        Ok(exit_status) => {
-            if exit_status.success() {
-                if let Err(e) = std::fs::rename(&output_file, path) {
-                    log_suspended!(
-                        error,
-                        "Error renaming file from {} to {}: {}",
-                        output_file.display(),
-                        path.display(),
-                        e
-                    );
-                    error_count.fetch_add(1, Ordering::Relaxed);
-                }
-            } else {
+    match output {
+        Ok(output) if output.status.success() => {
+            if let Err(e) = std::fs::rename(&output_file, path) {
                 log_suspended!(
                     error,
-                    "ffmpeg failed for {}. Exit code: {:?}",
+                    "Error renaming file from {} to {}: {}",
+                    output_file.display(),
                     path.display(),
-                    exit_status.code()
+                    e
                 );
                 error_count.fetch_add(1, Ordering::Relaxed);
-                // The temp file is removed automatically on drop.
             }
+        },
+        Ok(output) => {
+            // `-loglevel error` keeps stderr short; cap it anyway so a
+            // pathological file cannot flood the log.
+            let stderr_text = String::from_utf8_lossy(&output.stderr);
+            let stderr = tail_lines(&stderr_text, 5);
+            log_suspended!(
+                error,
+                "ffmpeg failed for {} (exit code {:?}): {}",
+                path.display(),
+                output.status.code(),
+                stderr
+            );
+            error_count.fetch_add(1, Ordering::Relaxed);
+            // The temp file is removed automatically on drop.
         },
         Err(e) => {
             log_suspended!(
@@ -587,6 +612,16 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn tail_lines_keeps_only_the_trailing_lines() {
+        let text = "l1\nl2\nl3\n";
+        assert_eq!(tail_lines(text, 5), text);
+        assert_eq!(tail_lines(text, 2), "l2\nl3\n");
+        assert_eq!(tail_lines(text, 1), "l3\n");
+        assert_eq!(tail_lines("", 3), "");
+        assert_eq!(tail_lines("l1\nl2\nl3\n", 0), "");
     }
 
     #[test]
