@@ -475,3 +475,182 @@ pub fn process_audio_files(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Writes `bytes` to `dir/name` and returns the path. The caller keeps
+    /// the temp dir alive for as long as the path is used.
+    fn write_in(dir: &Path, name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).expect("write fixture");
+        path
+    }
+
+    #[test]
+    fn atempo_in_range_is_a_single_filter() {
+        assert_eq!(build_atempo_filter(1.5).as_deref(), Some("atempo=1.5"));
+        assert_eq!(build_atempo_filter(0.5).as_deref(), Some("atempo=0.5"));
+        assert_eq!(build_atempo_filter(100.0).as_deref(), Some("atempo=100"));
+    }
+
+    #[test]
+    fn atempo_out_of_range_speeds_decompose_into_a_chain() {
+        for speed in [0.4_f32, 0.1, 0.25, 120.0, 10_000.0] {
+            let chain =
+                build_atempo_filter(speed).unwrap_or_else(|| panic!("no filter chain for {speed}"));
+            let values: Vec<f32> = chain
+                .split(',')
+                .map(|part| {
+                    part.strip_prefix("atempo=")
+                        .unwrap_or_else(|| panic!("bad segment {part}"))
+                        .parse::<f32>()
+                        .expect("numeric tempo")
+                })
+                .collect();
+            assert!(values.len() > 1, "expected a chain for {speed}: {chain}");
+            let product: f32 = values.iter().product();
+            assert!(
+                (product - speed).abs() < 1e-3,
+                "chain product {product} != {speed}"
+            );
+            for &value in &values {
+                assert!(
+                    (ATEMPO_MIN..=ATEMPO_MAX).contains(&value),
+                    "segment {value} out of range for {speed}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn atempo_rejects_invalid_speeds() {
+        assert!(build_atempo_filter(0.0).is_none());
+        assert!(build_atempo_filter(-1.5).is_none());
+        assert!(build_atempo_filter(f32::NAN).is_none());
+        assert!(build_atempo_filter(f32::INFINITY).is_none());
+    }
+
+    #[test]
+    fn format_parsing_accepts_names_alias_and_all() {
+        assert_eq!("OGG".parse::<AudioFormat>().ok(), Some(AudioFormat::OGG));
+        assert_eq!(" Mp3 ".parse::<AudioFormat>().ok(), Some(AudioFormat::MP3));
+        assert_eq!("m4a".parse::<AudioFormat>().ok(), Some(AudioFormat::AAC));
+        assert_eq!("all".parse::<AudioFormat>().ok(), Some(AudioFormat::ALL));
+    }
+
+    #[test]
+    fn format_parse_error_lists_canonical_names() {
+        let err = "flac2".parse::<AudioFormat>().unwrap_err();
+        for name in [
+            "ogg", "mp3", "wav", "flac", "aac", "opus", "alac", "wma", "all",
+        ] {
+            assert!(err.contains(name), "missing {name} in error: {err}");
+        }
+        assert!(!err.contains("m4a"), "alias leaked into error: {err}");
+    }
+
+    #[test]
+    fn lossless_encoder_args_are_fixed() {
+        let cases = [
+            (AudioFormat::FLAC, "flac"),
+            (AudioFormat::WAV, "pcm_s24le"),
+            (AudioFormat::ALAC, "alac"),
+        ];
+        for (format, codec) in cases {
+            for bitrate in [None, Some(64_000), Some(1_000_000)] {
+                assert_eq!(
+                    encoder_args(format, bitrate),
+                    ["-c:a", codec].map(String::from),
+                    "bitrate must not affect {codec}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lossy_encoder_args_cap_bitrate_below_default() {
+        // MP3 defaults to -q:a 2 (~190 kbps); a lower source bitrate switches
+        // to an explicit -b:a cap.
+        assert_eq!(
+            encoder_args(AudioFormat::MP3, Some(128_000)),
+            ["-c:a", "libmp3lame", "-b:a", "128000"].map(String::from)
+        );
+        assert_eq!(
+            encoder_args(AudioFormat::OPUS, Some(96_000)),
+            ["-c:a", "libopus", "-b:a", "96000"].map(String::from)
+        );
+        // At or above the default (or unknown) the quality preset is kept.
+        assert_eq!(
+            encoder_args(AudioFormat::MP3, Some(192_000)),
+            ["-c:a", "libmp3lame", "-q:a", "2"].map(String::from)
+        );
+        assert_eq!(
+            encoder_args(AudioFormat::MP3, None),
+            ["-c:a", "libmp3lame", "-q:a", "2"].map(String::from)
+        );
+    }
+
+    #[test]
+    fn detect_format_by_magic_bytes() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+
+        // Ogg Vorbis: first packet starts at offset 28 (27-byte page header
+        // + 1 segment-table entry).
+        let mut vorbis = vec![0; 28];
+        vorbis[..4].copy_from_slice(b"OggS");
+        vorbis.extend_from_slice(b"\x01vorbis");
+        vorbis.extend_from_slice(&[0; 16]);
+        let path = write_in(dir.path(), "a.ogg", &vorbis);
+        assert_eq!(detect_audio_format(&path), Some(AudioFormat::OGG));
+
+        let mut wav = b"RIFF".to_vec();
+        wav.extend_from_slice(&[0; 4]);
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(&[0; 8]);
+        let path = write_in(dir.path(), "a.wav", &wav);
+        assert_eq!(detect_audio_format(&path), Some(AudioFormat::WAV));
+
+        let mut flac = b"fLaC".to_vec();
+        flac.extend_from_slice(&[0; 8]);
+        let path = write_in(dir.path(), "a.flac", &flac);
+        assert_eq!(detect_audio_format(&path), Some(AudioFormat::FLAC));
+
+        // ASF header GUID.
+        let mut wma = vec![
+            0x30, 0x26, 0xb2, 0x75, 0x8e, 0x66, 0xcf, 0x11, 0xa6, 0xd9, 0x00, 0xaa, 0x00, 0x62,
+            0xce, 0x6c,
+        ];
+        wma.extend_from_slice(&[0; 16]);
+        let path = write_in(dir.path(), "a.wma", &wma);
+        assert_eq!(detect_audio_format(&path), Some(AudioFormat::WMA));
+
+        let mut id3 = b"ID3".to_vec();
+        id3.extend_from_slice(&[0; 20]);
+        let path = write_in(dir.path(), "a.mp3", &id3);
+        assert_eq!(detect_audio_format(&path), Some(AudioFormat::MP3));
+
+        // MPEG frame sync with layer bits set (0xFF 0xFB).
+        let mut mp3 = vec![0xff, 0xfb, 0x90, 0x00];
+        mp3.extend_from_slice(&[0; 20]);
+        let path = write_in(dir.path(), "a.mp3", &mp3);
+        assert_eq!(detect_audio_format(&path), Some(AudioFormat::MP3));
+    }
+
+    #[test]
+    fn detect_format_by_extension_fallback() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+
+        // mp4-family containers have no magic check; the extension decides.
+        let mut m4a = vec![0, 0, 0, 0x18];
+        m4a.extend_from_slice(b"ftypM4A ");
+        m4a.extend_from_slice(&[0; 8]);
+        let path = write_in(dir.path(), "a.m4a", &m4a);
+        assert_eq!(detect_audio_format(&path), Some(AudioFormat::AAC));
+
+        // Garbage without a known extension is undetectable.
+        let path = write_in(dir.path(), "noext", &[0x01; 20]);
+        assert_eq!(detect_audio_format(&path), None);
+    }
+}
