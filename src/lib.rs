@@ -516,8 +516,20 @@ pub fn process_audio_files(
     // own leftover temp files (already sped up, would compound the speed).
     let files: Vec<_> = WalkDir::new(folder)
         .into_iter()
-        .filter_map(Result::ok)
-        .filter(|e| e.path().is_file()) // Only count files for the progress bar
+        // Traversal errors (unreadable directory, name too long, ...) skip
+        // the entry instead of aborting the run.
+        .filter_map(|entry| {
+            match entry {
+                Ok(entry) => Some(entry),
+                Err(err) => {
+                    log::debug!("Skipping unreadable directory entry: {err}");
+                    None
+                },
+            }
+        })
+        // Only count files for the progress bar. The entry's cached file
+        // type avoids one stat syscall per path.
+        .filter(|e| e.file_type().is_file())
         .filter(|e| !is_temp_leftover(e.file_name()))
         .collect();
 
