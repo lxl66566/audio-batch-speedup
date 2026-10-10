@@ -4,10 +4,11 @@ use std::{
     ffi::OsStr,
     fs::File,
     io::Read,
-    path::Path,
+    num::NonZeroUsize,
+    path::{Path, PathBuf},
     process::Command,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
 };
@@ -302,19 +303,64 @@ fn is_temp_leftover(name: &OsStr) -> bool {
     name.to_string_lossy().starts_with(TEMP_PREFIX)
 }
 
+/// Run counters shared across the worker pool. The failure list is only
+/// locked when a file actually fails.
+#[derive(Default)]
+struct RunStats {
+    processed: AtomicUsize,
+    skipped: AtomicUsize,
+    failed: Mutex<Vec<(PathBuf, String)>>,
+}
+
+impl RunStats {
+    fn mark_processed(&self) {
+        self.processed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn mark_skipped(&self) {
+        self.skipped.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn push_failure(&self, path: &Path, reason: String) {
+        // The lock is only ever held for the push itself, so it cannot be
+        // poisoned; recover the guard regardless.
+        self.failed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((path.to_path_buf(), reason));
+    }
+
+    fn take_failures(&self) -> Vec<(PathBuf, String)> {
+        std::mem::take(
+            &mut *self
+                .failed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+}
+
+/// Records one failed file: logs it through the suspended progress bar and
+/// appends it to the failure list.
+macro_rules! record_failure {
+    ($stats:expr, $pb:expr, $path:expr, $reason:expr) => {
+        $pb.suspend(|| log::error!("Failed to process {}: {}", $path.display(), $reason));
+        $stats.push_failure($path, $reason);
+    };
+}
+
 /// Processes one audio file in place: re-encodes it sped up by `atempo_filter`
 /// into a sibling temp file, then renames over the original.
 ///
-/// Failures are logged and counted instead of propagated, so one bad file
-/// never aborts the batch.
+/// Failures are logged and recorded in `stats` instead of propagated, so one
+/// bad file never aborts the batch.
 fn process_file(
     path: &Path,
     atempo_filter: &str,
     formats: AudioFormat,
     can_probe: bool,
     pb: &ProgressBar,
-    error_count: &AtomicUsize,
-    skipped_count: &AtomicUsize,
+    stats: &RunStats,
 ) {
     // Suspend the progress bar while logging so log lines don't interleave
     // with the bar's redraw.
@@ -330,7 +376,7 @@ fn process_file(
             "Skipping file (format not detected): {}",
             path.display()
         );
-        skipped_count.fetch_add(1, Ordering::Relaxed);
+        stats.mark_skipped();
         return;
     };
 
@@ -340,7 +386,7 @@ fn process_file(
             "Skipping file (format not selected): {}",
             path.display()
         );
-        skipped_count.fetch_add(1, Ordering::Relaxed);
+        stats.mark_skipped();
         return;
     }
 
@@ -358,13 +404,7 @@ fn process_file(
     {
         Ok(f) => f,
         Err(e) => {
-            log_suspended!(
-                error,
-                "Failed to create temp file for {}: {}",
-                path.display(),
-                e
-            );
-            error_count.fetch_add(1, Ordering::Relaxed);
+            record_failure!(stats, pb, path, format!("failed to create temp file: {e}"));
             return;
         },
     };
@@ -414,14 +454,9 @@ fn process_file(
     match output {
         Ok(output) if output.status.success() => {
             if let Err(e) = std::fs::rename(&output_file, path) {
-                log_suspended!(
-                    error,
-                    "Error renaming file from {} to {}: {}",
-                    output_file.display(),
-                    path.display(),
-                    e
-                );
-                error_count.fetch_add(1, Ordering::Relaxed);
+                record_failure!(stats, pb, path, format!("failed to rename temp file: {e}"));
+            } else {
+                stats.mark_processed();
             }
         },
         Ok(output) => {
@@ -429,27 +464,28 @@ fn process_file(
             // pathological file cannot flood the log.
             let stderr_text = String::from_utf8_lossy(&output.stderr);
             let stderr = tail_lines(&stderr_text, 5);
-            log_suspended!(
-                error,
-                "ffmpeg failed for {} (exit code {:?}): {}",
-                path.display(),
-                output.status.code(),
-                stderr
+            record_failure!(
+                stats,
+                pb,
+                path,
+                format!("ffmpeg exit code {:?}: {}", output.status.code(), stderr)
             );
-            error_count.fetch_add(1, Ordering::Relaxed);
             // The temp file is removed automatically on drop.
         },
         Err(e) => {
-            log_suspended!(
-                error,
-                "Error executing ffmpeg for {}: {}",
-                path.display(),
-                e
-            );
-            error_count.fetch_add(1, Ordering::Relaxed);
+            record_failure!(stats, pb, path, format!("failed to execute ffmpeg: {e}"));
             // The temp file is removed automatically on drop.
         },
     }
+}
+
+/// Per-run outcome: how many files were processed and skipped, plus the
+/// files that failed with their reasons.
+#[derive(Clone, Debug)]
+pub struct ProcessSummary {
+    pub processed: usize,
+    pub skipped: usize,
+    pub failed: Vec<(PathBuf, String)>,
 }
 
 /// Process all audio files in the specified folder recursively with the given
@@ -460,10 +496,13 @@ fn process_file(
 /// * `folder` - Path to the folder containing audio files
 /// * `speed` - Speed multiplier (e.g., 1.5 for 1.5x speed)
 /// * `formats` - A bitflags object indicating which audio formats to process.
+/// * `jobs` - Number of parallel workers; `None` uses one worker per CPU core.
 ///
 /// # Returns
 ///
-/// * `Result<()>` - Ok(()) if successful, or an error if processing fails
+/// * `Result<ProcessSummary>` - The run summary, or an error if the run could not be started
+///   (invalid speed, ffmpeg unavailable). Individual file failures are reported through
+///   `ProcessSummary::failed` instead.
 ///
 /// # Example
 ///
@@ -475,13 +514,20 @@ fn process_file(
 /// let folder = Path::new("path/to/audio/files");
 /// let speed = 1.5;
 /// let formats = AudioFormat::OGG | AudioFormat::MP3;
-/// process_audio_files(folder, speed, formats).unwrap();
+/// let summary = process_audio_files(folder, speed, formats, None).unwrap();
+/// println!(
+///     "processed {}, skipped {}, failed {}",
+///     summary.processed,
+///     summary.skipped,
+///     summary.failed.len()
+/// );
 /// ```
 pub fn process_audio_files(
     folder: impl AsRef<Path>,
     speed: f32,
     formats: AudioFormat,
-) -> std::io::Result<()> {
+    jobs: Option<NonZeroUsize>,
+) -> std::io::Result<ProcessSummary> {
     let folder = folder.as_ref();
 
     let Some(atempo_filter) = build_atempo_filter(speed) else {
@@ -544,47 +590,37 @@ pub fn process_audio_files(
             .progress_chars("#>-"),
     );
 
-    let error_count = Arc::new(AtomicUsize::new(0));
-    let skipped_count = Arc::new(AtomicUsize::new(0));
+    let stats = Arc::new(RunStats::default());
 
     // One single-threaded ffmpeg per core saturates the CPU: the pool defaults
     // to one worker per core and each worker blocks on one ffmpeg at a time.
     // File durations are uneven, so allow fine-grained stealing to shrink the
     // tail.
-    let item_error_count = Arc::clone(&error_count);
-    let item_skipped_count = Arc::clone(&skipped_count);
+    let item_stats = Arc::clone(&stats);
     let item_pb = process_pb.clone();
-    pipe(files)
-        .with_workload(Workload::Unbalanced)
-        .for_each(move |entry| {
-            process_file(
-                entry.path(),
-                &atempo_filter,
-                formats,
-                can_probe,
-                &item_pb,
-                &item_error_count,
-                &item_skipped_count,
-            );
-            item_pb.inc(1);
-        });
+    let mut pool = pipe(files).with_workload(Workload::Unbalanced);
+    if let Some(jobs) = jobs {
+        pool = pool.with_compute_workers(jobs.get());
+    }
+    pool.for_each(move |entry| {
+        process_file(
+            entry.path(),
+            &atempo_filter,
+            formats,
+            can_probe,
+            &item_pb,
+            &item_stats,
+        );
+        item_pb.inc(1);
+    });
 
     process_pb.finish_with_message("Processing complete!");
 
-    let errors = error_count.load(Ordering::Relaxed);
-    let skipped = skipped_count.load(Ordering::Relaxed);
-
-    if errors > 0 {
-        log::error!("Finished with {errors} errors.");
-        return Err(std::io::Error::other(format!(
-            "{errors} file(s) failed to process"
-        )));
-    }
-    if skipped > 0 {
-        log::info!("Skipped {skipped} files.");
-    }
-
-    Ok(())
+    Ok(ProcessSummary {
+        processed: stats.processed.load(Ordering::Relaxed),
+        skipped: stats.skipped.load(Ordering::Relaxed),
+        failed: stats.take_failures(),
+    })
 }
 
 #[cfg(test)]
@@ -593,7 +629,7 @@ mod tests {
 
     /// Writes `bytes` to `dir/name` and returns the path. The caller keeps
     /// the temp dir alive for as long as the path is used.
-    fn write_in(dir: &Path, name: &str, bytes: &[u8]) -> std::path::PathBuf {
+    fn write_in(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
         let path = dir.join(name);
         std::fs::write(&path, bytes).expect("write fixture");
         path
