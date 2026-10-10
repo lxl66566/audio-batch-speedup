@@ -82,25 +82,27 @@ impl std::str::FromStr for AudioFormat {
 ///
 /// * `Option<AudioFormat>` - The detected audio format, or `None` if it cannot be determined.
 fn detect_audio_format(path: &Path) -> Option<AudioFormat> {
-    // Try to detect by magic bytes first
+    // Try to detect by magic bytes first. Files shorter than the read window
+    // are judged on the bytes they actually contain.
     let mut file = File::open(path).ok()?;
     let mut buffer = [0; 12]; // Read enough bytes for common headers
-    file.read_exact(&mut buffer).ok()?;
+    let n = file.read(&mut buffer).ok()?;
+    let head = &buffer[..n];
 
     // OGG (OggS)
-    if &buffer[0..4] == b"OggS" {
+    if head.starts_with(b"OggS") {
         return Some(AudioFormat::OGG);
     }
     // MP3 (ID3 tag or MPEG frame sync: 11 sync bits set, i.e. 0xFF Ex/FA/FB)
-    if &buffer[0..3] == b"ID3" || (buffer[0] == 0xff && (buffer[1] & 0xe0) == 0xe0) {
+    if head.starts_with(b"ID3") || matches!(head, [0xff, b1, ..] if (b1 & 0xe0) == 0xe0) {
         return Some(AudioFormat::MP3);
     }
     // WAV (RIFF header with WAVE)
-    if &buffer[0..4] == b"RIFF" && &buffer[8..12] == b"WAVE" {
+    if head.len() >= 12 && &head[..4] == b"RIFF" && &head[8..12] == b"WAVE" {
         return Some(AudioFormat::WAV);
     }
     // FLAC (fLaC)
-    if &buffer[0..4] == b"fLaC" {
+    if head.starts_with(b"fLaC") {
         return Some(AudioFormat::FLAC);
     }
     // AAC (often in MP4/M4A containers, which start with 'ftyp' or 'moov')
@@ -109,7 +111,7 @@ fn detect_audio_format(path: &Path) -> Option<AudioFormat> {
     // OPUS (often in Ogg containers, so OggS will catch it, or WebM)
     // ALAC (often in MP4/M4A containers)
     // WMA (ASF header)
-    if buffer[0..4] == [0x30, 0x26, 0xb2, 0x75] {
+    if head.starts_with(&[0x30, 0x26, 0xb2, 0x75]) {
         // GUID for ASF header
         return Some(AudioFormat::WMA);
     }
@@ -636,6 +638,17 @@ mod tests {
         mp3.extend_from_slice(&[0; 20]);
         let path = write_in(dir.path(), "a.mp3", &mp3);
         assert_eq!(detect_audio_format(&path), Some(AudioFormat::MP3));
+    }
+
+    #[test]
+    fn detect_format_on_files_shorter_than_the_header_window() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        // A 3-byte ID3 fragment plus the .mp3 extension is still an MP3.
+        let path = write_in(dir.path(), "a.mp3", b"ID3");
+        assert_eq!(detect_audio_format(&path), Some(AudioFormat::MP3));
+        // Truncated magic falls back to the extension.
+        let path = write_in(dir.path(), "b.wav", b"RIFF");
+        assert_eq!(detect_audio_format(&path), Some(AudioFormat::WAV));
     }
 
     #[test]
