@@ -1,6 +1,7 @@
 #![warn(clippy::cargo)]
 
 use std::{
+    ffi::OsStr,
     fs::File,
     io::Read,
     path::Path,
@@ -276,6 +277,16 @@ fn build_atempo_filter(speed: f32) -> Option<String> {
     Some(parts.join(","))
 }
 
+/// Prefix of the temp files created next to each source file.
+const TEMP_PREFIX: &str = ".abs_";
+
+/// Whether `name` belongs to this crate's temp-file namespace. Leftovers
+/// from an interrupted run must be excluded from processing because their
+/// content is already sped up.
+fn is_temp_leftover(name: &OsStr) -> bool {
+    name.to_string_lossy().starts_with(TEMP_PREFIX)
+}
+
 /// Processes one audio file in place: re-encodes it sped up by `atempo_filter`
 /// into a sibling temp file, then renames over the original.
 ///
@@ -326,7 +337,7 @@ fn process_file(
         .map(|e| format!(".{}", e.to_string_lossy()))
         .unwrap_or_default();
     let temp_file = match tempfile::Builder::new()
-        .prefix(".abs_")
+        .prefix(TEMP_PREFIX)
         .suffix(&suffix)
         .tempfile_in(path.parent().unwrap_or(Path::new(".")))
     {
@@ -467,11 +478,13 @@ pub fn process_audio_files(
         log::warn!("ffprobe not found in PATH; falling back to default encoder settings");
     }
 
-    // Collect all files that need to be processed
+    // Collect all files that need to be processed, excluding this crate's
+    // own leftover temp files (already sped up, would compound the speed).
     let files: Vec<_> = WalkDir::new(folder)
         .into_iter()
         .filter_map(Result::ok)
         .filter(|e| e.path().is_file()) // Only count files for the progress bar
+        .filter(|e| !is_temp_leftover(e.file_name()))
         .collect();
 
     let process_pb = ProgressBar::new(files.len() as u64);
@@ -719,6 +732,16 @@ mod tests {
         // Truncated magic falls back to the extension.
         let path = write_in(dir.path(), "b.wav", b"RIFF");
         assert_eq!(detect_audio_format(&path, false), Some(AudioFormat::WAV));
+    }
+
+    #[test]
+    fn temp_leftover_names_are_excluded_otherwise_hidden_files_are_not() {
+        assert!(is_temp_leftover(OsStr::new(".abs_leftover.mp3")));
+        assert!(is_temp_leftover(OsStr::new(".abs_")));
+        // Only the exact prefix matters, not hidden files in general.
+        assert!(!is_temp_leftover(OsStr::new(".hidden.mp3")));
+        assert!(!is_temp_leftover(OsStr::new("abs_x.mp3")));
+        assert!(!is_temp_leftover(OsStr::new(".mp3")));
     }
 
     #[test]
