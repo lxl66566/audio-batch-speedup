@@ -57,19 +57,21 @@ Then, in your Rust code:
 
 ```rust
 use std::path::Path;
-use audio_batch_speedup::{process_audio_files, AudioFormat};
+use audio_batch_speedup::{process_audio_files, AudioFormat, ProcessOptions};
 
 fn main() -> std::io::Result<()> {
     let folder = Path::new("path/to/your/audio/files");
     let speed = 1.5;
 
     // Process OGG and MP3 files with one worker per CPU core
-    let summary = process_audio_files(folder, speed, AudioFormat::OGG | AudioFormat::MP3, None, false)?;
+    let options = ProcessOptions::new(speed).formats(AudioFormat::OGG | AudioFormat::MP3);
+    let summary = process_audio_files(folder, options)?;
 
     // Process all supported formats, limited to 4 parallel jobs, with one
     // log line per file instead of the progress bar
-    let jobs = std::num::NonZeroUsize::new(4);
-    let summary = process_audio_files(folder, speed, AudioFormat::ALL, jobs, true)?;
+    let jobs = std::num::NonZeroUsize::new(4).unwrap();
+    let options = ProcessOptions::new(speed).jobs(jobs).verbose();
+    let summary = process_audio_files(folder, options)?;
 
     // An `Err` only means the run could not be started (invalid speed, ffmpeg
     // unavailable); per-file failures are collected in `summary.failed`.

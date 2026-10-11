@@ -313,17 +313,59 @@ fn summarize(outcomes: Vec<Outcome>) -> ProcessSummary {
     }
 }
 
-/// Process all audio files in the specified folder recursively with the given
-/// speed multiplier.
+/// Configuration for one [`process_audio_files`] run, built from
+/// [`ProcessOptions::new`] plus chained setters.
+#[derive(Clone, Copy, Debug)]
+pub struct ProcessOptions {
+    speed: f32,
+    formats: AudioFormat,
+    jobs: Option<NonZeroUsize>,
+    verbose: bool,
+}
+
+impl ProcessOptions {
+    /// Creates options with the given speed multiplier (e.g., `1.5` for 1.5x
+    /// speed). Formats default to all supported ones, jobs to one worker per
+    /// CPU core, and verbose to off.
+    #[must_use]
+    pub fn new(speed: f32) -> Self {
+        Self {
+            speed,
+            formats: AudioFormat::ALL,
+            jobs: None,
+            verbose: false,
+        }
+    }
+
+    /// Limits processing to the given formats (default: all).
+    #[must_use]
+    pub fn formats(mut self, formats: AudioFormat) -> Self {
+        self.formats = formats;
+        self
+    }
+
+    /// Limits parallelism to the given worker count (default: one worker per
+    /// CPU core).
+    #[must_use]
+    pub fn jobs(mut self, jobs: NonZeroUsize) -> Self {
+        self.jobs = Some(jobs);
+        self
+    }
+
+    /// Replaces the progress bar with one log line per file.
+    #[must_use]
+    pub fn verbose(mut self) -> Self {
+        self.verbose = true;
+        self
+    }
+}
+
+/// Process all audio files in the specified folder recursively.
 ///
 /// # Arguments
 ///
 /// * `folder` - Path to the folder containing audio files
-/// * `speed` - Speed multiplier (e.g., 1.5 for 1.5x speed)
-/// * `formats` - A bitflags object indicating which audio formats to process.
-/// * `jobs` - Number of parallel workers; `None` uses one worker per CPU core.
-/// * `verbose` - Print one log line per file (processed/skipped/failed) instead of drawing a
-///   progress bar.
+/// * `options` - Run configuration; see [`ProcessOptions`].
 ///
 /// # Returns
 ///
@@ -337,12 +379,11 @@ fn summarize(outcomes: Vec<Outcome>) -> ProcessSummary {
 /// ```no_run
 /// use std::path::Path;
 ///
-/// use audio_batch_speedup::{AudioFormat, process_audio_files};
+/// use audio_batch_speedup::{AudioFormat, ProcessOptions, process_audio_files};
 ///
 /// let folder = Path::new("path/to/audio/files");
-/// let speed = 1.5;
-/// let formats = AudioFormat::OGG | AudioFormat::MP3;
-/// let summary = process_audio_files(folder, speed, formats, None, false).unwrap();
+/// let options = ProcessOptions::new(1.5).formats(AudioFormat::OGG | AudioFormat::MP3);
+/// let summary = process_audio_files(folder, options).unwrap();
 /// println!(
 ///     "processed {}, skipped {}, failed {}",
 ///     summary.processed,
@@ -352,12 +393,15 @@ fn summarize(outcomes: Vec<Outcome>) -> ProcessSummary {
 /// ```
 pub fn process_audio_files(
     folder: impl AsRef<Path>,
-    speed: f32,
-    formats: AudioFormat,
-    jobs: Option<NonZeroUsize>,
-    verbose: bool,
+    options: ProcessOptions,
 ) -> std::io::Result<ProcessSummary> {
     let folder = folder.as_ref();
+    let ProcessOptions {
+        speed,
+        formats,
+        jobs,
+        verbose,
+    } = options;
 
     let Some(atempo_filter) = build_atempo_filter(speed) else {
         return Err(std::io::Error::new(

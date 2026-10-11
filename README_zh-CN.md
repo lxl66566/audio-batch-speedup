@@ -59,18 +59,20 @@ audio-batch-speedup = "0.1"  # 请使用最新版本
 
 ```rust
 use std::path::Path;
-use audio_batch_speedup::{process_audio_files, AudioFormat};
+use audio_batch_speedup::{process_audio_files, AudioFormat, ProcessOptions};
 
 fn main() -> std::io::Result<()> {
     let folder = Path::new("音频文件路径");
     let speed = 1.5;
 
     // 处理OGG和MP3文件，每个 CPU 核心一个 worker
-    let summary = process_audio_files(folder, speed, AudioFormat::OGG | AudioFormat::MP3, None, false)?;
+    let options = ProcessOptions::new(speed).formats(AudioFormat::OGG | AudioFormat::MP3);
+    let summary = process_audio_files(folder, options)?;
 
-    // 处理所有支持的音频格式，限制为 4 个并行任务
-    let jobs = std::num::NonZeroUsize::new(4);
-    let summary = process_audio_files(folder, speed, AudioFormat::ALL, jobs, true)?;
+    // 处理所有支持的音频格式，限制为 4 个并行任务，逐文件打印一行日志代替进度条
+    let jobs = std::num::NonZeroUsize::new(4).unwrap();
+    let options = ProcessOptions::new(speed).jobs(jobs).verbose();
+    let summary = process_audio_files(folder, options)?;
 
     // `Err` 仅表示任务无法启动（speed 非法、ffmpeg 缺失）；
     // 单个文件的失败收集在 `summary.failed` 中。

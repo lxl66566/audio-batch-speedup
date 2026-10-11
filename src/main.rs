@@ -1,7 +1,7 @@
 use std::{num::NonZeroUsize, path::PathBuf};
 
 use anyhow::{Result, bail};
-use audio_batch_speedup::AudioFormat;
+use audio_batch_speedup::{AudioFormat, ProcessOptions};
 use clap::Parser;
 use log::info;
 use spdlog::sink::GetSinkProp;
@@ -102,14 +102,16 @@ fn main() -> Result<()> {
         .iter()
         .fold(AudioFormat::empty(), |acc, f| acc | *f);
 
+    let mut options = ProcessOptions::new(args.speed).formats(selected_formats);
+    if let Some(jobs) = args.jobs {
+        options = options.jobs(jobs);
+    }
+    if args.verbose {
+        options = options.verbose();
+    }
+
     info!("Starting processing for folder: {}", args.input.display());
-    let summary = audio_batch_speedup::process_audio_files(
-        &args.input,
-        args.speed,
-        selected_formats,
-        args.jobs,
-        args.verbose,
-    )?;
+    let summary = audio_batch_speedup::process_audio_files(&args.input, options)?;
 
     info!(
         "Processing complete: {} processed, {} skipped, {} failed.",

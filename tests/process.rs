@@ -9,7 +9,7 @@ use std::{
     process::Command,
 };
 
-use audio_batch_speedup::{AudioFormat, process_audio_files};
+use audio_batch_speedup::{ProcessOptions, process_audio_files};
 
 /// Whether `program` runs and reports a version.
 fn available(program: &str) -> bool {
@@ -54,8 +54,8 @@ fn probe_codec(path: &Path) -> String {
 }
 
 /// A single-worker pool keeps the runs deterministic.
-fn one_job() -> Option<NonZeroUsize> {
-    NonZeroUsize::new(1)
+fn one_job() -> NonZeroUsize {
+    NonZeroUsize::MIN
 }
 
 #[test]
@@ -69,7 +69,7 @@ fn opus_files_keep_their_codec() {
     generate(&opus, "libopus");
 
     let summary =
-        process_audio_files(dir.path(), 2.0, AudioFormat::ALL, one_job(), false).expect("run");
+        process_audio_files(dir.path(), ProcessOptions::new(2.0).jobs(one_job())).expect("run");
     assert_eq!(summary.processed, 1);
     assert_eq!(summary.skipped, 0);
     assert!(
@@ -98,7 +98,7 @@ fn alac_files_keep_their_codec() {
     generate(&alac, "alac");
 
     let summary =
-        process_audio_files(dir.path(), 2.0, AudioFormat::ALL, one_job(), false).expect("run");
+        process_audio_files(dir.path(), ProcessOptions::new(2.0).jobs(one_job())).expect("run");
     assert_eq!(summary.processed, 1);
     assert_eq!(summary.skipped, 0);
     assert!(
@@ -127,7 +127,7 @@ fn leftover_temp_files_are_left_alone() {
     let before = std::fs::read(&leftover).expect("read leftover");
 
     let summary =
-        process_audio_files(dir.path(), 2.0, AudioFormat::ALL, one_job(), false).expect("run");
+        process_audio_files(dir.path(), ProcessOptions::new(2.0).jobs(one_job())).expect("run");
     // Internal artifacts are excluded from every counter.
     assert_eq!(summary.processed, 0);
     assert_eq!(summary.skipped, 0);
@@ -161,7 +161,7 @@ fn corrupted_files_are_reported_as_failures() {
         .unwrap_or_default();
 
     let summary =
-        process_audio_files(dir.path(), 2.0, AudioFormat::ALL, one_job(), false).expect("run");
+        process_audio_files(dir.path(), ProcessOptions::new(2.0).jobs(one_job())).expect("run");
     assert_eq!(summary.processed, 0);
     assert_eq!(summary.skipped, 0);
     assert_eq!(summary.failed.len(), 1, "expected exactly one failure");
