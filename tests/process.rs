@@ -163,8 +163,9 @@ fn corrupted_files_are_reported_as_failures() {
     assert_eq!(summary.failed.len(), 1, "expected exactly one failure");
     let (failed_path, reason) = &summary.failed[0];
     assert_eq!(failed_path.file_name(), Some(OsStr::new("corrupt.mp3")));
-    // The terminal line stays short; details live in the shared failure log.
-    assert!(reason.starts_with("ffmpeg exit code "), "reason: {reason}");
+    // The terminal line stays short; the exit code and stderr tail live in
+    // the shared failure log.
+    assert!(reason.starts_with("ffmpeg failed"), "reason: {reason}");
     assert!(!reason.contains('\n'), "single-line reason: {reason}");
 
     // All failures append to one kept log file in the temp dir, holding the

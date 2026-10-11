@@ -4,6 +4,7 @@ use anyhow::{Result, bail};
 use audio_batch_speedup::AudioFormat;
 use clap::Parser;
 use log::info;
+use spdlog::sink::GetSinkProp;
 
 #[derive(Parser)]
 #[command(author, version, about = "Batch speed up audio files")]
@@ -42,6 +43,14 @@ fn init_logger() -> Result<()> {
     let sink = spdlog::sink::StdStreamSink::builder()
         .stderr()
         .build_arc()?;
+    // Terminal records carry only a timestamp, a level, and the message; the
+    // logger name and the source location would be noise for a CLI.
+    sink.prop().set_formatter(
+        spdlog::formatter::FullFormatter::builder()
+            .logger_name(false)
+            .source_location(false)
+            .build(),
+    );
     let logger = spdlog::default_logger().fork_with(|new| {
         new.sinks_mut().clear();
         new.sinks_mut().push(sink);
