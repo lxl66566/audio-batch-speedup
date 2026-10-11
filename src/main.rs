@@ -25,6 +25,10 @@ struct Cli {
     /// Number of parallel ffmpeg jobs (default: one per CPU core)
     #[arg(short, long)]
     jobs: Option<NonZeroUsize>,
+
+    /// Print one log line per file (processed/skipped/failed) instead of the progress bar
+    #[arg(short, long)]
+    verbose: bool,
 }
 
 /// Sets up spdlog as the backend of the `log` facade.
@@ -104,6 +108,7 @@ fn main() -> Result<()> {
         args.speed,
         selected_formats,
         args.jobs,
+        args.verbose,
     )?;
 
     info!(

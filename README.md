@@ -38,6 +38,7 @@ abs --input /path/to/your/audio/folder --speed 2 --jobs 4               # speed 
   Supported formats: `ogg`, `mp3`, `wav`, `flac`, `aac`, `opus`, `alac`, `wma`.
   Default: `all`.
 - `-j, --jobs <JOBS>`: Number of parallel ffmpeg jobs. Default: use all CPU core.
+- `-v, --verbose`: Print one log line per file (processed/skipped/failed) instead of the progress bar.
 
 **Logging:** the log level defaults to `info` and can be overridden with the `SPDLOG_RS_LEVEL` environment variable (e.g. `SPDLOG_RS_LEVEL=debug abs ...`).
 
@@ -63,11 +64,12 @@ fn main() -> std::io::Result<()> {
     let speed = 1.5;
 
     // Process OGG and MP3 files with one worker per CPU core
-    let summary = process_audio_files(folder, speed, AudioFormat::OGG | AudioFormat::MP3, None)?;
+    let summary = process_audio_files(folder, speed, AudioFormat::OGG | AudioFormat::MP3, None, false)?;
 
-    // Process all supported formats, limited to 4 parallel jobs
+    // Process all supported formats, limited to 4 parallel jobs, with one
+    // log line per file instead of the progress bar
     let jobs = std::num::NonZeroUsize::new(4);
-    let summary = process_audio_files(folder, speed, AudioFormat::ALL, jobs)?;
+    let summary = process_audio_files(folder, speed, AudioFormat::ALL, jobs, true)?;
 
     // An `Err` only means the run could not be started (invalid speed, ffmpeg
     // unavailable); per-file failures are collected in `summary.failed`.

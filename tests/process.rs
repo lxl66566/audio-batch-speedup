@@ -68,7 +68,8 @@ fn opus_files_keep_their_codec() {
     let opus = dir.path().join("a.opus");
     generate(&opus, "libopus");
 
-    let summary = process_audio_files(dir.path(), 2.0, AudioFormat::ALL, one_job()).expect("run");
+    let summary =
+        process_audio_files(dir.path(), 2.0, AudioFormat::ALL, one_job(), false).expect("run");
     assert_eq!(summary.processed, 1);
     assert_eq!(summary.skipped, 0);
     assert!(
@@ -96,7 +97,8 @@ fn alac_files_keep_their_codec() {
     let alac = dir.path().join("a.m4a");
     generate(&alac, "alac");
 
-    let summary = process_audio_files(dir.path(), 2.0, AudioFormat::ALL, one_job()).expect("run");
+    let summary =
+        process_audio_files(dir.path(), 2.0, AudioFormat::ALL, one_job(), false).expect("run");
     assert_eq!(summary.processed, 1);
     assert_eq!(summary.skipped, 0);
     assert!(
@@ -124,7 +126,8 @@ fn leftover_temp_files_are_left_alone() {
     generate(&leftover, "libmp3lame");
     let before = std::fs::read(&leftover).expect("read leftover");
 
-    let summary = process_audio_files(dir.path(), 2.0, AudioFormat::ALL, one_job()).expect("run");
+    let summary =
+        process_audio_files(dir.path(), 2.0, AudioFormat::ALL, one_job(), false).expect("run");
     // Internal artifacts are excluded from every counter.
     assert_eq!(summary.processed, 0);
     assert_eq!(summary.skipped, 0);
@@ -157,7 +160,8 @@ fn corrupted_files_are_reported_as_failures() {
         .map(|entries| entries.filter_map(Result::ok).map(|e| e.path()).collect())
         .unwrap_or_default();
 
-    let summary = process_audio_files(dir.path(), 2.0, AudioFormat::ALL, one_job()).expect("run");
+    let summary =
+        process_audio_files(dir.path(), 2.0, AudioFormat::ALL, one_job(), false).expect("run");
     assert_eq!(summary.processed, 0);
     assert_eq!(summary.skipped, 0);
     assert_eq!(summary.failed.len(), 1, "expected exactly one failure");

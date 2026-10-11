@@ -40,6 +40,7 @@ abs --input 音频文件夹路径 --speed 2 --jobs 4              # 以 4 个并
   - 支持格式：`ogg`, `mp3`, `wav`, `flac`, `aac`, `opus`, `alac`, `wma`
   - 默认值：`all`
 - `-j, --jobs <并行数>`：并行 ffmpeg 任务数（默认：每个 CPU 核心一个任务）
+- `-v, --verbose`：每个文件打印一行日志（已处理/已跳过/失败），代替进度条
 
 **日志**：日志级别默认为 `info`，可通过 `SPDLOG_RS_LEVEL` 环境变量覆盖（如 `SPDLOG_RS_LEVEL=debug abs ...`）。
 
@@ -65,11 +66,11 @@ fn main() -> std::io::Result<()> {
     let speed = 1.5;
 
     // 处理OGG和MP3文件，每个 CPU 核心一个 worker
-    let summary = process_audio_files(folder, speed, AudioFormat::OGG | AudioFormat::MP3, None)?;
+    let summary = process_audio_files(folder, speed, AudioFormat::OGG | AudioFormat::MP3, None, false)?;
 
     // 处理所有支持的音频格式，限制为 4 个并行任务
     let jobs = std::num::NonZeroUsize::new(4);
-    let summary = process_audio_files(folder, speed, AudioFormat::ALL, jobs)?;
+    let summary = process_audio_files(folder, speed, AudioFormat::ALL, jobs, true)?;
 
     // `Err` 仅表示任务无法启动（speed 非法、ffmpeg 缺失）；
     // 单个文件的失败收集在 `summary.failed` 中。

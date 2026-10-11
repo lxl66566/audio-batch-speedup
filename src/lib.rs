@@ -55,11 +55,38 @@ enum Outcome {
     },
 }
 
+/// Per-file terminal reporting for a run: either a shared progress bar, or
+/// (verbose mode) plain log lines with no bar. `ProgressBar::clone` shares
+/// state, so a cloned `Reporter` steps the same bar.
+#[derive(Clone)]
+enum Reporter {
+    Bar(ProgressBar),
+    Lines,
+}
+
+impl Reporter {
+    /// Runs `f` with the progress bar suspended so log lines never interleave
+    /// with its redraw; line mode has nothing to suspend.
+    fn suspend(&self, f: impl FnOnce()) {
+        match self {
+            Self::Bar(pb) => pb.suspend(f),
+            Self::Lines => f(),
+        }
+    }
+
+    /// Steps the progress bar by one file, if one is shown.
+    fn inc(&self) {
+        if let Self::Bar(pb) = self {
+            pb.inc(1);
+        }
+    }
+}
+
 impl Outcome {
     /// Logs the failure with the progress bar suspended, and wraps it for
     /// the run summary.
-    fn fail(path: &Path, pb: &ProgressBar, reason: String) -> Outcome {
-        pb.suspend(|| log::error!("Failed to process {}: {}", path.display(), reason));
+    fn fail(path: &Path, reporter: &Reporter, reason: String) -> Outcome {
+        reporter.suspend(|| log::error!("Failed to process {}: {}", path.display(), reason));
         Outcome::Failed {
             path: path.to_path_buf(),
             reason,
@@ -77,19 +104,29 @@ fn process_file(
     atempo_filter: &str,
     formats: AudioFormat,
     can_probe: bool,
-    pb: &ProgressBar,
+    reporter: &Reporter,
 ) -> Outcome {
+    let verbose = matches!(reporter, Reporter::Lines);
+    // Each file gets exactly one line: failures are always errors, while the
+    // processed/skipped notes are the visible per-file lines in verbose mode
+    // and debug details otherwise.
+    let file_level = if verbose {
+        log::Level::Info
+    } else {
+        log::Level::Debug
+    };
+
     // Suspend the progress bar while logging so log lines don't interleave
     // with the bar's redraw.
     macro_rules! log_suspended {
-        ($level:ident, $($arg:tt)*) => {
-            pb.suspend(|| log::$level!($($arg)*))
+        ($level:expr, $($arg:tt)*) => {
+            reporter.suspend(|| log::log!($level, $($arg)*))
         };
     }
 
     let Some(detected_format) = detect_audio_format(path, can_probe) else {
         log_suspended!(
-            debug,
+            file_level,
             "Skipping file (format not detected): {}",
             path.display()
         );
@@ -98,7 +135,7 @@ fn process_file(
 
     if !formats.contains(detected_format) {
         log_suspended!(
-            debug,
+            file_level,
             "Skipping file (format not selected): {}",
             path.display()
         );
@@ -120,7 +157,7 @@ fn process_file(
     {
         Ok(f) => f,
         Err(e) => {
-            return Outcome::fail(path, pb, format!("failed to create temp file: {e}"));
+            return Outcome::fail(path, reporter, format!("failed to create temp file: {e}"));
         },
     };
     let output_file = temp_file.path().to_path_buf();
@@ -173,8 +210,9 @@ fn process_file(
     match Command::new("ffmpeg").args(&args).output() {
         Ok(output) if output.status.success() => {
             if let Err(e) = std::fs::rename(&output_file, path) {
-                Outcome::fail(path, pb, format!("failed to rename temp file: {e}"))
+                Outcome::fail(path, reporter, format!("failed to rename temp file: {e}"))
             } else {
+                log_suspended!(file_level, "Processed {}", path.display());
                 Outcome::Processed
             }
         },
@@ -186,7 +224,12 @@ fn process_file(
                 Some(cause) => format!("ffmpeg failed ({cause})"),
                 None => "ffmpeg failed".to_string(),
             };
-            log_suspended!(error, "Failed to process {}: {}", path.display(), reason);
+            log_suspended!(
+                log::Level::Error,
+                "Failed to process {}: {}",
+                path.display(),
+                reason
+            );
             Outcome::FfmpegFailed {
                 path: path.to_path_buf(),
                 reason,
@@ -195,7 +238,7 @@ fn process_file(
                 stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             }
         },
-        Err(e) => Outcome::fail(path, pb, format!("failed to execute ffmpeg: {e}")),
+        Err(e) => Outcome::fail(path, reporter, format!("failed to execute ffmpeg: {e}")),
     }
 }
 
@@ -279,6 +322,8 @@ fn summarize(outcomes: Vec<Outcome>) -> ProcessSummary {
 /// * `speed` - Speed multiplier (e.g., 1.5 for 1.5x speed)
 /// * `formats` - A bitflags object indicating which audio formats to process.
 /// * `jobs` - Number of parallel workers; `None` uses one worker per CPU core.
+/// * `verbose` - Print one log line per file (processed/skipped/failed) instead of drawing a
+///   progress bar.
 ///
 /// # Returns
 ///
@@ -297,7 +342,7 @@ fn summarize(outcomes: Vec<Outcome>) -> ProcessSummary {
 /// let folder = Path::new("path/to/audio/files");
 /// let speed = 1.5;
 /// let formats = AudioFormat::OGG | AudioFormat::MP3;
-/// let summary = process_audio_files(folder, speed, formats, None).unwrap();
+/// let summary = process_audio_files(folder, speed, formats, None, false).unwrap();
 /// println!(
 ///     "processed {}, skipped {}, failed {}",
 ///     summary.processed,
@@ -310,6 +355,7 @@ pub fn process_audio_files(
     speed: f32,
     formats: AudioFormat,
     jobs: Option<NonZeroUsize>,
+    verbose: bool,
 ) -> std::io::Result<ProcessSummary> {
     let folder = folder.as_ref();
 
@@ -362,16 +408,22 @@ pub fn process_audio_files(
         .filter(|e| !is_temp_leftover(e.file_name()))
         .collect();
 
-    let process_pb = ProgressBar::new(files.len() as u64);
-    process_pb.set_style(
-        ProgressStyle::default_bar()
-            .template(
-                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) \
-                 {msg}",
-            )
-            .expect("Internal Error: Failed to set progress bar style")
-            .progress_chars("#>-"),
-    );
+    // Verbose mode reports per file with log lines, so no bar is drawn.
+    let reporter = if verbose {
+        Reporter::Lines
+    } else {
+        let pb = ProgressBar::new(files.len() as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template(
+                    "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} \
+                     ({eta}) {msg}",
+                )
+                .expect("Internal Error: Failed to set progress bar style")
+                .progress_chars("#>-"),
+        );
+        Reporter::Bar(pb)
+    };
 
     // One single-threaded ffmpeg per core saturates the CPU: the pool defaults
     // to one worker per core and each worker blocks on one ffmpeg at a time.
@@ -380,20 +432,28 @@ pub fn process_audio_files(
     //
     // Workers share nothing: each returns its per-file outcome, and the
     // outcomes are folded into the summary after the pool joins.
-    let item_pb = process_pb.clone();
     let mut pool = pipe(files).with_workload(Workload::Unbalanced);
     if let Some(jobs) = jobs {
         pool = pool.with_compute_workers(jobs.get());
     }
+    let item_reporter = reporter.clone();
     let outcomes = pool
         .map(move |entry| {
-            let outcome = process_file(entry.path(), &atempo_filter, formats, can_probe, &item_pb);
-            item_pb.inc(1);
+            let outcome = process_file(
+                entry.path(),
+                &atempo_filter,
+                formats,
+                can_probe,
+                &item_reporter,
+            );
+            item_reporter.inc();
             outcome
         })
         .collect();
 
-    process_pb.finish_with_message("Processing complete!");
+    if let Reporter::Bar(pb) = &reporter {
+        pb.finish_with_message("Processing complete!");
+    }
 
     Ok(summarize(outcomes))
 }
