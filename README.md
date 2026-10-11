@@ -41,6 +41,8 @@ abs --input /path/to/your/audio/folder --speed 2 --jobs 4               # speed 
 
 **Logging:** the log level defaults to `info` and can be overridden with the `SPDLOG_RS_LEVEL` environment variable (e.g. `SPDLOG_RS_LEVEL=debug abs ...`).
 
+**Failure reporting:** each failed file is reported on one terminal line with its path and the ffmpeg exit code. Every failure appends the exact ffmpeg command and the last lines of the stderr to a shared `abs-fail-*.log` file in the system temp directory, whose path is printed at the end of the run. The tool exits with a non-zero code if any file failed.
+
 ### Library (lib) Usage
 
 Add `audio-batch-speedup` to your `Cargo.toml`:

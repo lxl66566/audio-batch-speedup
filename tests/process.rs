@@ -76,6 +76,8 @@ fn opus_files_keep_their_codec() {
         "unexpected failures: {:?}",
         summary.failed
     );
+    // A clean run creates no failure log.
+    assert!(summary.failure_log.is_none());
 
     if !available("ffprobe") {
         eprintln!("skipping codec assertion: ffprobe not found");
@@ -150,11 +152,52 @@ fn corrupted_files_are_reported_as_failures() {
     let path = dir.path().join("corrupt.mp3");
     std::fs::write(&path, &corrupt).expect("write corrupt file");
 
+    // Snapshot the temp dir so the run's ffmpeg log file can be identified.
+    let temp_before: std::collections::HashSet<PathBuf> = std::fs::read_dir(std::env::temp_dir())
+        .map(|entries| entries.filter_map(Result::ok).map(|e| e.path()).collect())
+        .unwrap_or_default();
+
     let summary = process_audio_files(dir.path(), 2.0, AudioFormat::ALL, one_job()).expect("run");
     assert_eq!(summary.processed, 0);
     assert_eq!(summary.skipped, 0);
     assert_eq!(summary.failed.len(), 1, "expected exactly one failure");
     let (failed_path, reason) = &summary.failed[0];
     assert_eq!(failed_path.file_name(), Some(OsStr::new("corrupt.mp3")));
-    assert!(!reason.is_empty(), "failure reason must not be empty");
+    // The terminal line stays short; details live in the shared failure log.
+    assert!(reason.starts_with("ffmpeg exit code "), "reason: {reason}");
+    assert!(!reason.contains('\n'), "single-line reason: {reason}");
+
+    // All failures append to one kept log file in the temp dir, holding the
+    // ffmpeg command and the stderr tail.
+    let log_path = summary
+        .failure_log
+        .as_ref()
+        .expect("a failure must set the failure log path");
+    let log = std::fs::read_to_string(log_path).expect("read failure log");
+    assert!(log.starts_with("=== "), "entry header: {log}");
+    assert!(log.contains("\ncommand: ffmpeg "), "command line: {log}");
+    assert!(
+        log.contains("Failed to find two consecutive MPEG audio frames"),
+        "stderr tail: {log}"
+    );
+
+    let new_logs: Vec<PathBuf> = std::fs::read_dir(std::env::temp_dir())
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| !temp_before.contains(p))
+                .filter(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("abs-fail-"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        new_logs,
+        vec![log_path.clone()],
+        "expected exactly one failure log file"
+    );
 }

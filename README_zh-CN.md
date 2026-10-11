@@ -43,6 +43,8 @@ abs --input 音频文件夹路径 --speed 2 --jobs 4              # 以 4 个并
 
 **日志**：日志级别默认为 `info`，可通过 `SPDLOG_RS_LEVEL` 环境变量覆盖（如 `SPDLOG_RS_LEVEL=debug abs ...`）。
 
+**失败报告**：每个失败的文件在终端输出一行错误，包含路径与 ffmpeg 退出码。每次失败会把实际执行的 ffmpeg 命令与 stderr 的最后几行追加到系统临时目录下共享的 `abs-fail-*.log` 文件，其路径在运行结束时输出。存在失败文件时以非零退出码结束。
+
 ### 作为库使用
 
 在 Cargo.toml 中添加依赖：

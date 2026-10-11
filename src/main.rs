@@ -103,6 +103,9 @@ fn main() -> Result<()> {
         summary.skipped,
         summary.failed.len()
     );
+    if let Some(log_path) = &summary.failure_log {
+        info!("Failure log: {}", log_path.display());
+    }
     // Each failure was already logged by the lib with its path and reason, so
     // only the summary is printed here.
     if !summary.failed.is_empty() {

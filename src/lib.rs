@@ -1,7 +1,7 @@
 use std::{
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fs::File,
-    io::Read,
+    io::{Read, Write},
     num::NonZeroUsize,
     path::{Path, PathBuf},
     process::Command,
@@ -274,8 +274,10 @@ fn encoder_args(format: AudioFormat, source_bitrate: Option<u64>) -> Vec<String>
     args
 }
 
-/// Returns at most the last `max_lines` lines of `text`, to keep failure
-/// logs concise.
+/// How many trailing stderr lines are kept per failure-log entry.
+const FAILED_STDERR_LINES: usize = 5;
+
+/// Returns at most the last `max_lines` lines of `text`.
 fn tail_lines(text: &str, max_lines: usize) -> &str {
     if max_lines == 0 {
         return "";
@@ -287,6 +289,16 @@ fn tail_lines(text: &str, max_lines: usize) -> &str {
         .nth(max_lines)
         .map_or(0, |(i, _)| i + 1);
     &text[start..]
+}
+
+/// Formats one entry of the run's shared failure log: the exact ffmpeg
+/// command and the last lines of its stderr.
+fn failure_entry(source: &Path, command: &str, exit_code: Option<i32>, stderr: &str) -> String {
+    format!(
+        "=== {} (exit code {exit_code:?})\ncommand: {command}\n{}\n\n",
+        source.display(),
+        tail_lines(stderr, FAILED_STDERR_LINES)
+    )
 }
 
 /// The minimum/maximum tempo a single `atempo` filter instance accepts.
@@ -327,13 +339,14 @@ fn is_temp_leftover(name: &OsStr) -> bool {
     name.to_string_lossy().starts_with(TEMP_PREFIX)
 }
 
-/// Run counters shared across the worker pool. The failure list is only
-/// locked when a file actually fails.
+/// Run counters shared across the worker pool. The failure list and the
+/// shared failure log are only locked when a file actually fails.
 #[derive(Default)]
 struct RunStats {
     processed: AtomicUsize,
     skipped: AtomicUsize,
     failed: Mutex<Vec<(PathBuf, String)>>,
+    failure_log: Mutex<Option<(PathBuf, tempfile::NamedTempFile)>>,
 }
 
 impl RunStats {
@@ -361,6 +374,38 @@ impl RunStats {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         )
+    }
+
+    /// Appends `entry` to the run's shared failure log, creating the file on
+    /// the first failure. Returns the log path, or `None` if the log could
+    /// not be created or written.
+    fn append_failure_log(&self, entry: &str) -> Option<PathBuf> {
+        let mut guard = self
+            .failure_log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if guard.is_none() {
+            let file = tempfile::Builder::new()
+                .prefix("abs-fail-")
+                .suffix(".log")
+                .disable_cleanup(true)
+                .tempfile()
+                .ok()?;
+            let path = file.path().to_path_buf();
+            *guard = Some((path, file));
+        }
+        let (path, file) = guard.as_mut().unwrap();
+        file.write_all(entry.as_bytes()).ok()?;
+        file.flush().ok()?;
+        Some(path.clone())
+    }
+
+    fn failure_log_path(&self) -> Option<PathBuf> {
+        self.failure_log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|(path, _)| path.clone())
     }
 }
 
@@ -445,35 +490,48 @@ fn process_file(
         .then(|| probe_audio_bitrate(path))
         .flatten();
 
-    // stdout/stderr are captured instead of inherited so ffmpeg diagnostics
-    // never interleave with the progress bar; they are only logged on
-    // failure.
-    let output = Command::new("ffmpeg")
+    // The exact command line is recorded in the failure log, so the args are
+    // built as one list instead of chained builder calls.
+    let mut args: Vec<OsString> = vec![
         // Parallel workers run many ffmpeg processes at once; none of them
         // may read the terminal's stdin.
-        .arg("-nostdin")
+        "-nostdin".into(),
         // Batch mode keeps one ffmpeg per CPU core busy; intra-process
         // threading would only oversubscribe the machine, so decode,
         // filtergraph and encode are all pinned to a single thread.
-        .arg("-threads")
-        .arg("1")
-        .arg("-filter_threads")
-        .arg("1")
-        .arg("-i")
-        .arg(path)
-        .arg("-filter:a")
-        .arg(atempo_filter)
-        .arg("-vn")
-        .args(encoder_args(detected_format, source_bitrate))
-        .arg("-threads")
-        .arg("1")
-        .arg("-map_metadata")
-        .arg("0")
-        .arg(&output_file)
-        .arg("-y")
-        .arg("-loglevel")
-        .arg("error")
-        .output();
+        "-threads".into(),
+        "1".into(),
+        "-filter_threads".into(),
+        "1".into(),
+        "-i".into(),
+        path.as_os_str().to_os_string(),
+        "-filter:a".into(),
+        atempo_filter.into(),
+        "-vn".into(),
+    ];
+    for arg in encoder_args(detected_format, source_bitrate) {
+        args.push(arg.into());
+    }
+    args.extend([
+        "-threads".into(),
+        "1".into(),
+        "-map_metadata".into(),
+        "0".into(),
+    ]);
+    args.push(output_file.as_os_str().to_os_string());
+    args.extend(["-y".into(), "-loglevel".into(), "error".into()]);
+
+    // stdout/stderr are captured instead of inherited so ffmpeg diagnostics
+    // never interleave with the progress bar; they only reach the failure
+    // log.
+    let command = format!(
+        "ffmpeg {}",
+        args.iter()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    let output = Command::new("ffmpeg").args(&args).output();
 
     match output {
         Ok(output) if output.status.success() => {
@@ -484,16 +542,23 @@ fn process_file(
             }
         },
         Ok(output) => {
-            // `-loglevel error` keeps stderr short; cap it anyway so a
-            // pathological file cannot flood the log.
-            let stderr_text = String::from_utf8_lossy(&output.stderr);
-            let stderr = tail_lines(&stderr_text, 5);
-            record_failure!(
-                stats,
-                pb,
+            // The terminal line stays short; the command and the stderr tail
+            // go to the run's shared failure log.
+            let entry = failure_entry(
                 path,
-                format!("ffmpeg exit code {:?}: {}", output.status.code(), stderr)
+                &command,
+                output.status.code(),
+                &String::from_utf8_lossy(&output.stderr),
             );
+            let reason = if stats.append_failure_log(&entry).is_some() {
+                format!("ffmpeg exit code {:?}", output.status.code())
+            } else {
+                format!(
+                    "ffmpeg exit code {:?}; failed to write the failure log to the temp dir",
+                    output.status.code()
+                )
+            };
+            record_failure!(stats, pb, path, reason);
             // The temp file is removed automatically on drop.
         },
         Err(e) => {
@@ -510,6 +575,7 @@ pub struct ProcessSummary {
     pub processed: usize,
     pub skipped: usize,
     pub failed: Vec<(PathBuf, String)>,
+    pub failure_log: Option<PathBuf>,
 }
 
 /// Process all audio files in the specified folder recursively with the given
@@ -526,7 +592,8 @@ pub struct ProcessSummary {
 ///
 /// * `Result<ProcessSummary>` - The run summary, or an error if the run could not be started
 ///   (invalid speed, ffmpeg unavailable). Individual file failures are reported through
-///   `ProcessSummary::failed` instead.
+///   `ProcessSummary::failed`; their ffmpeg diagnostics are appended to the shared log exposed as
+///   `ProcessSummary::failure_log`.
 ///
 /// # Example
 ///
@@ -644,6 +711,7 @@ pub fn process_audio_files(
         processed: stats.processed.load(Ordering::Relaxed),
         skipped: stats.skipped.load(Ordering::Relaxed),
         failed: stats.take_failures(),
+        failure_log: stats.failure_log_path(),
     })
 }
 
@@ -703,6 +771,29 @@ mod tests {
         assert_eq!(tail_lines(text, 1), "l3\n");
         assert_eq!(tail_lines("", 3), "");
         assert_eq!(tail_lines("l1\nl2\nl3\n", 0), "");
+    }
+
+    #[test]
+    fn failure_entry_contains_header_command_and_stderr_tail() {
+        // -1094995529 is ffmpeg's AVERROR_INVALIDDATA as an exit code.
+        const INVALID_DATA_EXIT_CODE: i32 = -1_094_995_529;
+        let entry = failure_entry(
+            Path::new("Z:/a b/corrupt.mp3"),
+            "ffmpeg -nostdin -i x",
+            Some(INVALID_DATA_EXIT_CODE),
+            "l1\nl2\nl3\nl4\nl5\nl6\nl7\n",
+        );
+        assert!(entry.starts_with(&format!(
+            "=== Z:/a b/corrupt.mp3 (exit code Some({INVALID_DATA_EXIT_CODE}))\n"
+        )));
+        assert!(entry.contains("command: ffmpeg -nostdin -i x\n"));
+        assert!(
+            entry.ends_with(&format!(
+                "{}\n\n",
+                tail_lines("l1\nl2\nl3\nl4\nl5\nl6\nl7\n", FAILED_STDERR_LINES)
+            )),
+            "entry must end with the stderr tail: {entry}"
+        );
     }
 
     #[test]
