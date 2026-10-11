@@ -1,7 +1,11 @@
 //! ffmpeg/ffprobe invocation helpers: argument building, probing, and
 //! failure diagnostics.
 
-use std::{ffi::OsString, path::Path, process::Command};
+use std::{
+    ffi::{OsStr, OsString},
+    path::Path,
+    process::Command,
+};
 
 use crate::format::AudioFormat;
 
@@ -129,11 +133,26 @@ pub(crate) fn build_atempo_filter(speed: f32) -> Option<String> {
 }
 
 /// Renders an ffmpeg invocation (program name plus args) for the failure log.
+///
+/// Arguments containing whitespace or commas (or empty ones) are double-quoted
+/// so the logged line can be pasted into cmd, bash, or PowerShell as-is;
+/// PowerShell splits unquoted comma-separated args into several arguments.
 pub(crate) fn command_line(args: &[OsString]) -> String {
+    fn push_arg(line: &mut String, arg: &OsStr) {
+        let text = arg.to_string_lossy();
+        if text.is_empty() || text.chars().any(|c| c.is_whitespace() || c == ',') {
+            line.push('"');
+            line.push_str(&text);
+            line.push('"');
+        } else {
+            line.push_str(&text);
+        }
+    }
+
     let mut line = String::from("ffmpeg");
     for arg in args {
         line.push(' ');
-        line.push_str(&arg.to_string_lossy());
+        push_arg(&mut line, arg);
     }
     line
 }
@@ -272,6 +291,24 @@ mod tests {
         assert_eq!(tail_lines(text, 1), "l3\n");
         assert_eq!(tail_lines("", 3), "");
         assert_eq!(tail_lines("l1\nl2\nl3\n", 0), "");
+    }
+
+    #[test]
+    fn command_line_quotes_args_with_whitespace_or_commas() {
+        let args: Vec<_> = [
+            "-nostdin",
+            "-i",
+            "a b/two.mp3",
+            "-filter:a",
+            "atempo=0.5,atempo=0.5",
+            "-y",
+        ]
+        .map(OsString::from)
+        .into();
+        assert_eq!(
+            command_line(&args),
+            "ffmpeg -nostdin -i \"a b/two.mp3\" -filter:a \"atempo=0.5,atempo=0.5\" -y"
+        );
     }
 
     #[test]
