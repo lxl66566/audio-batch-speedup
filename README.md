@@ -9,9 +9,9 @@ This crate was initially designed for visual novel audio speedup, as visual nove
 ## Features
 
 - Parallel processing of multiple audio files recursively, maximizing speed by utilizing multiple CPU cores.
-- Configurable speed adjustment.
+- Configurable speed adjustment and parallelism.
 - Support for multiple audio formats.
-- Format detection: Prioritizes detecting audio format from file content (magic bytes) and falls back to file extension if content detection is not possible.
+- Format detection: prioritizes detecting the audio format from file content (magic bytes), falling back to the file extension if the content is inconclusive. See [Format detection](#format-detection).
 
 ## Usage
 
@@ -27,6 +27,7 @@ Then, run the executable:
 
 ```bash
 abs --input /path/to/your/audio/folder --speed 1.5 --formats ogg,mp3     # speed up all OGG and MP3 files in /path/to/your/audio/folder by 1.5x
+abs --input /path/to/your/audio/folder --speed 2 --jobs 4               # speed up all supported files with 4 parallel jobs
 ```
 
 **Arguments:**
@@ -36,6 +37,9 @@ abs --input /path/to/your/audio/folder --speed 1.5 --formats ogg,mp3     # speed
 - `-f, --formats <FORMATS>`: Comma-separated list of audio formats to process (e.g., `ogg,mp3,wav`). Use `all` to process all supported formats.
   Supported formats: `ogg`, `mp3`, `wav`, `flac`, `aac`, `opus`, `alac`, `wma`.
   Default: `all`.
+- `-j, --jobs <JOBS>`: Number of parallel ffmpeg jobs. Default: use all CPU core.
+
+**Logging:** the log level defaults to `info` and can be overridden with the `SPDLOG_RS_LEVEL` environment variable (e.g. `SPDLOG_RS_LEVEL=debug abs ...`).
 
 ### Library (lib) Usage
 
@@ -55,21 +59,39 @@ use audio_batch_speedup::{process_audio_files, AudioFormat};
 fn main() -> std::io::Result<()> {
     let folder = Path::new("path/to/your/audio/files");
     let speed = 1.5;
-    // Process OGG and MP3 files
-    process_audio_files(folder, speed, AudioFormat::OGG | AudioFormat::MP3)?;
 
-    // Process all supported audio files
-    process_audio_files(folder, speed, AudioFormat::ALL)?;
+    // Process OGG and MP3 files with one worker per CPU core
+    let summary = process_audio_files(folder, speed, AudioFormat::OGG | AudioFormat::MP3, None)?;
+
+    // Process all supported formats, limited to 4 parallel jobs
+    let jobs = std::num::NonZeroUsize::new(4);
+    let summary = process_audio_files(folder, speed, AudioFormat::ALL, jobs)?;
+
+    // An `Err` only means the run could not be started (invalid speed, ffmpeg
+    // unavailable); per-file failures are collected in `summary.failed`.
+    for (path, reason) in &summary.failed {
+        eprintln!("failed: {}: {reason}", path.display());
+    }
+    println!(
+        "processed {}, skipped {}, failed {}",
+        summary.processed, summary.skipped, summary.failed.len()
+    );
 
     Ok(())
 }
 ```
 
+## Format detection
+
+Formats are detected from file content (magic bytes) first, falling back to the file extension when the content is inconclusive:
+
+- Ogg containers are classified by their first page: an `OpusHead` ID header means Opus, anything else is treated as Vorbis (OGG).
+- The mp4 family (`.m4a`) can hold either AAC or ALAC, which magic bytes cannot distinguish; ffprobe tells them apart by codec name. When ffprobe is missing, `.m4a` files are always treated as AAC, so ALAC files may be re-encoded lossily. This is a known limitation.
+- Bare ADTS `.aac` files and MP3 files share the MPEG audio frame sync word; the layer bits distinguish the two.
+
 ## Encoding
 
-Speeding up requires decoding and re-encoding the audio stream. To avoid the
-quality loss of ffmpeg's default per-container encoder settings, each format
-is re-encoded explicitly:
+Speeding up an encoded file always requires decoding and re-encoding the audio stream, so every processed file goes through one re-encode generation. To avoid the quality loss of ffmpeg's default per-container encoder settings, each format is re-encoded explicitly:
 
 | Format | Encoder settings                |
 | ------ | ------------------------------- |
@@ -82,14 +104,13 @@ is re-encoded explicitly:
 | AAC    | `aac -b:a 192k`                 |
 | WMA    | `wmav2 -b:a 192k`               |
 
-For lossy formats, the output bitrate is capped at the source bitrate
-(detected via ffprobe) so that a speedup never inflates the file size;
-files with a source bitrate at or above the defaults use the settings above.
-If ffprobe is unavailable, the default settings are used for all files.
+For lossy formats, the output bitrate is capped at the source bitrate (detected via ffprobe) so that a speedup never inflates the file size; files with a source bitrate at or above the defaults use the settings above. If ffprobe is unavailable, the default settings are used for all files.
 
-This requires an ffmpeg build with the `libmp3lame`, `libvorbis`, and
-`libopus` encoders enabled (most full builds include them).
+Embedded cover art (attached pictures) is dropped by `-vn`, because the video stream cannot be kept through the re-encode.
+
+This requires an ffmpeg build with the `libmp3lame`, `libvorbis`, and `libopus` encoders enabled (most full builds include them).
 
 ## Requirements
 
 - FFmpeg must be installed and available in the system PATH.
+- ffprobe (optional, usually shipped with ffmpeg): used to distinguish ALAC from AAC in mp4-family files and to cap lossy output bitrates at the source bitrate.
